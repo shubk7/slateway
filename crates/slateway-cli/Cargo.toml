@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+[package]
+name = "slateway-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Slateway control CLI; drives slatewayd over local IPC."
+
+[lints]
+workspace = true

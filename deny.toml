@@ -1,0 +1,53 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# cargo-deny configuration. Sections and fields not present use the
+# defaults of the installed cargo-deny (schema checked against 0.20.2).
+
+[advisories]
+ignore = []
+
+[licenses]
+# Slateway is GPL-3.0-or-later (docs/DECISIONS.md ADR-001). Every
+# dependency must be compatible with GPLv3 (AGENTS.md rule 5), so only
+# licenses with that property are allowed; anything else fails
+# `cargo deny check licenses`.
+allow = [
+    "0BSD",
+    "Apache-2.0 WITH LLVM-exception",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "GPL-3.0-only",
+    "GPL-3.0-or-later",
+    "ISC",
+    "LGPL-3.0-only",
+    "LGPL-3.0-or-later",
+    "MIT-0",
+    "MIT",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+]
+confidence-threshold = 0.8
+exceptions = []
+
+[licenses.private]
+# Workspace crates are not published to any registry.
+ignore = true
+registries = []
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+
+[sources]
+# Dependencies come from crates.io only; git sources need an explicit,
+# reviewed addition to allow-git (AGENTS.md rule 5).
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
