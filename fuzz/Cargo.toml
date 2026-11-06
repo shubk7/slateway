@@ -1,0 +1,34 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+[package]
+name = "slateway-proto-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Standalone workspace: the fuzz crate is not a member of the root
+# workspace; it is built with cargo fuzz and its own lockfile.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.slateway-proto]
+path = "../crates/slateway-proto"
+
+[[bin]]
+name = "frame_header"
+path = "fuzz_targets/frame_header.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "input_batch"
+path = "fuzz_targets/input_batch.rs"
+test = false
+doc = false
+bench = false

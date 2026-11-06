@@ -2,4 +2,21 @@
 
 //! Slateway wire codec and schemas, no I/O.
 //!
-//! Framing, channels and messages are specified in `docs/PROTOCOL.md`.
+//! Implements the layouts fixed in `docs/PROTOCOL.md` (draft v0):
+//!
+//! - [`frame`]: the 16-byte frame header every frame carries.
+//! - [`channel`]: channel identifiers.
+//! - [`input`]: the 16-byte packed input event and its batches.
+//!
+//! Everything here is I/O-free and allocation-free. Parsers validate
+//! before any size-dependent work and never panic on untrusted bytes.
+//! Control-message Protobuf schemas are designed with the handshake
+//! work and are not part of this crate yet.
+
+pub mod channel;
+pub mod frame;
+pub mod input;
+
+pub use channel::{Channel, UnknownChannelError};
+pub use frame::{FrameError, FrameHeader, HEADER_LEN, MAX_PAYLOAD_LEN};
+pub use input::{BatchEncodeError, EVENT_LEN, InputError, InputEvent};

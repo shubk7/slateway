@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# Fuzz targets build with libFuzzer and sanitizers, which need nightly
+# (AGENTS.md fuzz commands). The root rust-toolchain.toml keeps the
+# main workspace on stable; this file overrides it for fuzz/ only.
+[toolchain]
+channel = "nightly"
+components = ["rust-src"]

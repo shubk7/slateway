@@ -11,3 +11,9 @@ description = "Slateway wire codec and schemas, no I/O."
 
 [lints]
 workspace = true
+
+[dependencies]
+thiserror = "2.0.21"
+
+[dev-dependencies]
+proptest = "1.12.0"
