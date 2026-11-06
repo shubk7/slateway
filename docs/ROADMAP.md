@@ -16,7 +16,7 @@ Feature IDs are defined in `SCOPE.md`. Latency targets are hypotheses: measure f
 ## M0 Foundation
 
 - [x] Repo skeleton: workspace, `rust-toolchain.toml`, `.gitattributes`, `deny.toml`, `LICENSE`, SPDX headers
-- [ ] CI for Windows, Linux and Android with fmt, clippy, deny
+- [x] CI for Windows, Linux and Android with fmt, clippy, deny
 - [ ] `slateway-proto`: frame codec, schemas, property tests, fuzz target
 - [ ] `Transport` trait, adb-reverse transport, loopback transport
 - [ ] Android shell: connect, foreground service, handshake
