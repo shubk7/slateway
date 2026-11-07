@@ -84,6 +84,24 @@ The host monotonic clock is the session reference. The host estimates the tablet
 
 The tablet handles its own rotation; coordinates are always in the stream's frame.
 
+## Control schemas
+
+Control payloads are protobuf (proto3, package `slateway.control.v0`). The
+normative schema is `crates/slateway-proto/proto/control.proto`; host and
+tablet both generate code from that one file. The frame header's `type`
+field selects the message:
+
+| type | Message | Direction |
+|---|---|---|
+| 1 | Hello | tablet to host |
+| 2 | HelloAck | host to tablet |
+| 3 | Close | both |
+| 4+ | unassigned | |
+
+Type numbers are never reused. Unknown control types are an error in
+draft v0 (both sides run the same version). Capability bitmasks have all
+bits reserved in M0; bits are documented here as they get assigned.
+
 ## Media
 
 - **Video:** H.264 High profile, Annex-B, SPS/PPS before every IDR, no B-frames.

@@ -14,6 +14,8 @@ Format: decision, why, revisit trigger. New decisions are appended here; pending
 | 008 | Headless daemon plus thin CLI, tray UI later | Keeps core testable and UI-toolkit choice out of the critical path | Never |
 | 009 | Android minSdk 29 | Covers the reference tablets and broad devices; low-latency decode hints improve on API 30+ | Reference devices cannot run it |
 | 010 | Transport order: adb reverse, then USB tethering, then AOA, then Wi-Fi | Fastest to build and test first; removing the USB-debugging requirement later | Tethering proves unreliable on Windows |
+| 011 | Android applicationId `org.slateway.app` | Matches the project name; provisional value confirmed for the M0 shell before anything ships | Play Store or F-Droid demands a different id |
+| 012 | Control messages in proto3 with one shared schema (`crates/slateway-proto/proto/control.proto`), dispatched by the frame header's `type` number | ADR-004 chose protobuf; one schema file keeps host and tablet byte-identical; type numbers are never reused (PROTOCOL.md) | Wire format needs a redesign |
 
 ## Pending
 
@@ -22,6 +24,5 @@ Format: decision, why, revisit trigger. New decisions are appended here; pending
 - Windows IDD base project (S2)
 - Android library for Noise (S3)
 - GUI toolkit for the tray app
-- Android applicationId (provisional `org.slateway.app`)
 - Wi-Fi transport design (N1)
 - HEVC or AV1 support
