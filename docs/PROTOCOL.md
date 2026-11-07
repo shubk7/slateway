@@ -13,6 +13,25 @@ One ordered, reliable byte stream per session, carrying typed channels. Encrypti
 
 Default port 47820, configurable. Listeners bind to loopback or the specific tether interface, never all interfaces.
 
+## Noise records
+
+Everything on the stream is encrypted with `Noise_XX_25519_ChaChaPoly_SHA256`
+(`SECURITY.md`), carried in length-prefixed records:
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 2 | record length, little-endian, at most 65535 |
+| 2 | len | Noise ciphertext |
+
+65535 bytes is the Noise protocol's maximum message size. Decrypted
+record payloads concatenate into a plain byte stream: handshake
+messages while the three-message XX handshake is in progress (-> e,
+<- e, ee, s, es, -> s, se; the tablet initiates and the host responds,
+roles fixed), then 16-byte-header frames (see below) once both sides
+are in transport mode. Both sides derive the 6-digit pairing code from
+the handshake hash: first 4 bytes, big-endian, mod 1,000,000,
+zero-padded.
+
 ## Frame header (16 bytes)
 
 | Offset | Size | Field | Notes |
