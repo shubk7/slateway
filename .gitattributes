@@ -1,2 +1,4 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 * text=auto eol=lf
+# Windows batch files can misbehave with LF (labels/goto); keep CRLF.
+*.bat text eol=crlf
