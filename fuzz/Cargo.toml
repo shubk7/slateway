@@ -15,6 +15,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+prost = "0.14"
 
 [dependencies.slateway-proto]
 path = "../crates/slateway-proto"
@@ -29,6 +30,13 @@ bench = false
 [[bin]]
 name = "input_batch"
 path = "fuzz_targets/input_batch.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "control_message"
+path = "fuzz_targets/control_message.rs"
 test = false
 doc = false
 bench = false

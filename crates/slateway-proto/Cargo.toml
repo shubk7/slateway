@@ -13,7 +13,11 @@ description = "Slateway wire codec and schemas, no I/O."
 workspace = true
 
 [dependencies]
+prost = "0.14.4"
 thiserror = "2.0.21"
 
 [dev-dependencies]
 proptest = "1.12.0"
+
+[build-dependencies]
+prost-build = "0.14.4"

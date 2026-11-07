@@ -14,9 +14,14 @@
 //! work and are not part of this crate yet.
 
 pub mod channel;
+pub mod control;
 pub mod frame;
 pub mod input;
 
 pub use channel::{Channel, UnknownChannelError};
+pub use control::{
+    CLOSE_TYPE, Close, CloseReason, DecodeLimits, HELLO_ACK_TYPE, HELLO_TYPE, Hello, HelloAck,
+    Screen, VideoCodec,
+};
 pub use frame::{FrameError, FrameHeader, HEADER_LEN, MAX_PAYLOAD_LEN};
 pub use input::{BatchEncodeError, EVENT_LEN, InputError, InputEvent};
