@@ -16,13 +16,13 @@ Format: decision, why, revisit trigger. New decisions are appended here; pending
 | 010 | Transport order: adb reverse, then USB tethering, then AOA, then Wi-Fi | Fastest to build and test first; removing the USB-debugging requirement later | Tethering proves unreliable on Windows |
 | 011 | Android applicationId `org.slateway.app` | Matches the project name; provisional value confirmed for the M0 shell before anything ships | Play Store or F-Droid demands a different id |
 | 012 | Control messages in proto3 with one shared schema (`crates/slateway-proto/proto/control.proto`), dispatched by the frame header's `type` number | ADR-004 chose protobuf; one schema file keeps host and tablet byte-identical; type numbers are never reused (PROTOCOL.md) | Wire format needs a redesign |
+| 013 | Spike S3 result: snow on both sides — the Android app loads a Rust `.so` (snow 0.10.0, rev 34, Apache-2.0 OR MIT, Trail of Bits audited) through a small JNI facade, built with cargo-ndk | One maintained, audited implementation on host and tablet gives wire interop by construction. noise-java is unmaintained since 2022 (rev 30, not on Maven); mutual TLS needs cert/pinning glue and stays the fallback per ADR-006 | snow loses maintenance, or the NDK build chain proves too costly for CI |
 
 ## Pending
 
 - Windows virtual microphone approach (S5)
 - Linux virtual monitor strategy per compositor (S1)
 - Windows IDD base project (S2)
-- Android library for Noise (S3)
 - GUI toolkit for the tray app
 - Wi-Fi transport design (N1)
 - HEVC or AV1 support
