@@ -11,3 +11,8 @@ description = "Slateway platform traits and shared types only."
 
 [lints]
 workspace = true
+
+[dependencies]
+async-trait = "0.1.92"
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["net", "process", "io-util", "rt", "macros"] }
