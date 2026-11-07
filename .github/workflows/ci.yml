@@ -35,6 +35,21 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      # prost-build (slateway-proto) shells out to protoc; runners do
+      # not ship it.
+      - name: Install protoc
+        shell: bash
+        run: |
+          if command -v apt-get >/dev/null; then
+            sudo apt-get update -q
+            sudo apt-get install -y -q protobuf-compiler
+          elif command -v choco >/dev/null; then
+            choco install protoc -y --no-progress
+          else
+            echo "no known protoc installer for this runner" >&2
+            exit 1
+          fi
+          protoc --version
       - run: cargo fmt --all --check
       - run: cargo build --workspace
       - run: cargo test --workspace
