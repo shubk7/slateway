@@ -53,6 +53,34 @@ message Close {
   CloseReason reason = 1;
 }
 
+// Clock sync (frame types 4 and 5, docs/PROTOCOL.md "Clocks"): the
+// host sends Ping once per second; the tablet answers Pong. The host
+// stamps t3 itself on arrival, so only t0 to t2 cross the wire. All
+// timestamps are monotonic microseconds in the sender's own timebase.
+message Ping {
+  // Host send time.
+  uint64 t0 = 1;
+}
+
+message Pong {
+  // Echoed host send time.
+  uint64 t0 = 1;
+  // Tablet receive time.
+  uint64 t1 = 2;
+  // Tablet send time.
+  uint64 t2 = 3;
+}
+
+// Tablet health report for the latency overlay (docs/PROTOCOL.md,
+// "Control messages"): decode time and queue depth. Extended
+// additively as stages land; zero in M0.
+message Stats {
+  // Decode duration of the last frame.
+  uint64 decode_us = 1;
+  // Frames queued for decode.
+  uint32 queue_depth = 2;
+}
+
 message DecodeLimits {
   uint32 max_width_px = 1;
   uint32 max_height_px = 2;

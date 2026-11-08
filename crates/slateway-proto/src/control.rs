@@ -15,6 +15,15 @@ pub const HELLO_ACK_TYPE: u16 = 2;
 /// Frame header `type` for [`Close`].
 pub const CLOSE_TYPE: u16 = 3;
 
+/// Frame header `type` for [`Ping`] (host to tablet).
+pub const PING_TYPE: u16 = 4;
+
+/// Frame header `type` for [`Pong`] (tablet to host).
+pub const PONG_TYPE: u16 = 5;
+
+/// Frame header `type` for [`Stats`] (tablet to host).
+pub const STATS_TYPE: u16 = 6;
+
 include!(concat!(env!("OUT_DIR"), "/slateway.control.v0.rs"));
 
 #[cfg(test)]
@@ -81,6 +90,9 @@ mod tests {
         assert_eq!(HELLO_TYPE, 1);
         assert_eq!(HELLO_ACK_TYPE, 2);
         assert_eq!(CLOSE_TYPE, 3);
+        assert_eq!(PING_TYPE, 4);
+        assert_eq!(PONG_TYPE, 5);
+        assert_eq!(STATS_TYPE, 6);
     }
 
     /// A Hello rides in a control frame: the whole frame round-trips

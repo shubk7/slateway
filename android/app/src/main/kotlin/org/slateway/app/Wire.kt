@@ -3,6 +3,8 @@
 package org.slateway.app
 
 import slateway.control.v0.Hello
+import slateway.control.v0.Ping
+import slateway.control.v0.Pong
 import slateway.control.v0.VideoCodec
 import java.io.DataInputStream
 import java.net.ProtocolException
@@ -33,6 +35,9 @@ object Protocol {
     const val HELLO_TYPE: Int = 1
     const val HELLO_ACK_TYPE: Int = 2
     const val CLOSE_TYPE: Int = 3
+    const val PING_TYPE: Int = 4
+    const val PONG_TYPE: Int = 5
+    const val STATS_TYPE: Int = 6
 }
 
 /**
@@ -70,6 +75,21 @@ fun writeRecord(output: java.io.OutputStream, ciphertext: ByteArray) {
     Frame.putU16(lenBytes, 0, ciphertext.size)
     output.write(lenBytes)
     output.write(ciphertext)
+}
+
+/**
+ * Builds the Pong answer to a Ping payload (docs/PROTOCOL.md,
+ * "Clocks"): the echoed t0 plus t1/t2 from the tablet's monotonic
+ * clock in microseconds.
+ */
+fun buildPong(pingPayload: ByteArray, t1Us: Long, t2Us: Long): ByteArray {
+    val ping = Ping.parseFrom(pingPayload)
+    return Pong.newBuilder()
+        .setT0(ping.t0)
+        .setT1(t1Us)
+        .setT2(t2Us)
+        .build()
+        .toByteArray()
 }
 
 /** One parsed 16-byte header without its payload. */

@@ -84,7 +84,15 @@ Major mismatch is refused with an error. Minor changes are additive only. Protob
 
 ## Clocks
 
-The host monotonic clock is the session reference. The host estimates the tablet offset from `Ping`/`Pong` using the minimum-RTT samples. Tablet-originated media is converted to host time on arrival. pts is relative to session start.
+The host monotonic clock is the session reference. The host sends Ping
+(type 4) once per second with its send time t0; the tablet answers
+Pong (type 5) with t0 echoed, its receive time t1 and its send time
+t2; the host stamps t3 on arrival. The host estimates the tablet
+offset as ((t1 - t0) + (t2 - t3)) / 2 and the RTT as
+(t3 - t0) - (t2 - t1), keeping the minimum-RTT sample. All timestamps
+are monotonic microseconds in each side's own timebase; the offset
+absorbs the epoch difference. Tablet-originated media is converted to
+host time on arrival. pts is relative to session start.
 
 ## Input event (16 bytes, packed in batches)
 
@@ -115,7 +123,10 @@ field selects the message:
 | 1 | Hello | tablet to host |
 | 2 | HelloAck | host to tablet |
 | 3 | Close | both |
-| 4+ | unassigned | |
+| 4 | Ping | host to tablet |
+| 5 | Pong | tablet to host |
+| 6 | Stats | tablet to host |
+| 7+ | unassigned | |
 
 Type numbers are never reused. Unknown control types are an error in
 draft v0 (both sides run the same version). Capability bitmasks have all

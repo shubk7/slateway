@@ -59,6 +59,9 @@ pub enum SessionError {
     /// A decrypted frame failed to parse.
     #[error(transparent)]
     Frame(#[from] slateway_proto::frame::FrameError),
+    /// A decrypted control message failed to decode.
+    #[error(transparent)]
+    Decode(#[from] prost::DecodeError),
 }
 
 /// Derives the 6-digit pairing code from the handshake hash

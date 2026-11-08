@@ -7,6 +7,8 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
+import slateway.control.v0.Ping
+import slateway.control.v0.Pong
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.DataInputStream
@@ -177,6 +179,16 @@ class WireTest {
         bytes[1] = 0
         Frame.putU32(bytes, 4, Protocol.MAX_PAYLOAD_LEN + 1)
         assertProtocolError { FrameHeader.parse(bytes) }
+    }
+
+    @Test
+    fun pongCarriesEchoedPingAndTabletTimes() {
+        val ping = Ping.newBuilder().setT0(123456L).build()
+        val pong = buildPong(ping.toByteArray(), t1Us = 200000L, t2Us = 200050L)
+        val parsed = Pong.parseFrom(pong)
+        assertEquals(123456L, parsed.t0)
+        assertEquals(200000L, parsed.t1)
+        assertEquals(200050L, parsed.t2)
     }
 
     private fun assertProtocolError(block: () -> Unit) {
