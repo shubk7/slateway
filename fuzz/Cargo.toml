@@ -18,7 +18,7 @@ libfuzzer-sys = "0.4"
 prost = "0.14"
 
 [dependencies.slateway-proto]
-path = "../crates/slateway-proto"
+path = "../crates/slateway-proto", version = "0.1.0"
 
 [[bin]]
 name = "frame_header"

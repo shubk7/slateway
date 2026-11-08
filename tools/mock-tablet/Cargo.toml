@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+[package]
+name = "mock-tablet"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Scripted tablet client for Slateway tests (docs/ARCHITECTURE.md)."
+
+[lints]
+workspace = true
+
+[dependencies]
+slateway-core = { path = "../../crates/slateway-core", version = "0.1.0" }
+slateway-proto = { path = "../../crates/slateway-proto", version = "0.1.0" }
+prost = "0.14"
+thiserror = "2"
+tokio = { version = "1", features = ["io-util", "rt", "macros", "net", "time"] }

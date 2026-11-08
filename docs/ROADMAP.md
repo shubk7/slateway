@@ -22,7 +22,7 @@ Feature IDs are defined in `SCOPE.md`. Latency targets are hypotheses: measure f
 - [x] Android shell: connect, foreground service, handshake
 - [x] Noise handshake, pairing code, key storage
 - [x] Clock sync, stats, latency overlay plumbing
-- [ ] `tools/mock-tablet`
+- [x] `tools/mock-tablet`
 
 **Exit:** authenticated, encrypted echo with RTT and clock offset on both tablets and both OSes; CI green.
 

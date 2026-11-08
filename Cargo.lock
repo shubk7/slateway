@@ -487,6 +487,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "mock-tablet"
+version = "0.1.0"
+dependencies = [
+ "prost",
+ "slateway-core",
+ "slateway-proto",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "multimap"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -894,6 +905,16 @@ version = "0.1.0"
 [[package]]
 name = "slatewayd"
 version = "0.1.0"
+dependencies = [
+ "mock-tablet",
+ "prost",
+ "slateway-core",
+ "slateway-platform",
+ "slateway-proto",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
 
 [[package]]
 name = "snow"

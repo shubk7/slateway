@@ -11,3 +11,15 @@ description = "Slateway host daemon."
 
 [lints]
 workspace = true
+
+[dependencies]
+prost = "0.14"
+slateway-core = { path = "../slateway-core", version = "0.1.0" }
+slateway-platform = { path = "../slateway-platform", version = "0.1.0" }
+slateway-proto = { path = "../slateway-proto", version = "0.1.0" }
+thiserror = "2.0.21"
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
+
+[dev-dependencies]
+mock-tablet = { path = "../../tools/mock-tablet", version = "0.1.0" }
+tempfile = "3"

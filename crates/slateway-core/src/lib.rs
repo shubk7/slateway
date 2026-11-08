@@ -8,10 +8,11 @@
 
 pub mod clock;
 pub mod crypto;
+pub mod echo;
 pub mod keys;
 pub mod stats;
 
-pub use clock::{ClockSync, SAMPLE_WINDOW, Sample, sync_once};
+pub use clock::{ClockSync, SAMPLE_WINDOW, Sample, monotonic_us, sync_once};
 pub use crypto::{
     CIPHER_SUITE, HandshakeDone, KEY_LEN, MAX_PLAINTEXT, MAX_RECORD, SecureSession, SessionError,
     SessionHandshake, pairing_code,

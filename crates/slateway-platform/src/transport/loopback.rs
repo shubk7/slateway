@@ -60,6 +60,10 @@ impl Transport for LoopbackTransport {
     async fn stream(&mut self) -> Result<BoxStream, TransportError> {
         let listener = self.listener.take().ok_or(TransportError::NotReady)?;
         let (stream, _peer) = listener.accept().await?;
+        // Latency rule 5: frames are sent immediately, on both ends of
+        // the link. Without this the daemon's replies wait on Nagle
+        // against the peer's delayed ACK (~40 ms on Linux).
+        let _ = stream.set_nodelay(true);
         Ok(Box::new(stream))
     }
 }

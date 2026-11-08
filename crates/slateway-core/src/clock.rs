@@ -5,6 +5,9 @@
 //! are monotonic microseconds in each side's own timebase; the offset
 //! absorbs the epoch difference (latency rule 9: monotonic only).
 
+use std::sync::OnceLock;
+use std::time::Instant;
+
 use prost::Message;
 use slateway_proto::Channel;
 use slateway_proto::control::{PING_TYPE, PONG_TYPE, Ping, Pong};
@@ -66,6 +69,13 @@ impl ClockSync {
     pub fn samples(&self) -> &[Sample] {
         &self.samples
     }
+}
+
+/// Microseconds on this process's monotonic clock; only differences
+/// are meaningful (latency rule 9: monotonic clocks only).
+pub fn monotonic_us() -> u64 {
+    static START: OnceLock<Instant> = OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_micros() as u64
 }
 
 /// Runs one Ping/Pong exchange over `channel` and records the sample.

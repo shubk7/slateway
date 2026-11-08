@@ -6,6 +6,12 @@
 //! generates the tablet's Kotlin code. A control-channel payload is
 //! one message, selected by the frame header's `type` field.
 
+/// Protocol major version: draft v0 (`docs/PROTOCOL.md`).
+pub const PROTOCOL_MAJOR: u32 = 0;
+
+/// Protocol minor version; additive changes bump this.
+pub const PROTOCOL_MINOR: u32 = 0;
+
 /// Frame header `type` for [`Hello`].
 pub const HELLO_TYPE: u16 = 1;
 
