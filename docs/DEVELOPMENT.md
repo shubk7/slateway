@@ -13,6 +13,18 @@ Build, test and lint commands live in `AGENTS.md`. This file covers the environm
 
 `rustup`, `clang`, `pkgconf`, `ffmpeg`, `pipewire`, `protobuf`, `android-tools`, a JDK, Android Studio (AUR), `v4l2loopback-dkms` and matching kernel headers. Then `rustup default stable` and `cargo install cargo-deny cargo-fuzz`.
 
+## Android native library (ADR-013)
+
+The tablet's Noise facade is Rust (`android/native`) built with cargo-ndk:
+
+```bash
+sdkmanager "ndk;28.2.13676358"           # r28c; cargo-ndk finds it via ANDROID_HOME
+rustup target add aarch64-linux-android
+cargo install cargo-ndk
+```
+
+`./gradlew assembleDebug` runs the `buildNative` task and packs `libslateway_native.so` (arm64-v8a) into the APK. Without cargo-ndk or the NDK the build skips the facade with a warning and the app reports the missing library; CI passes `-Pslateway.nativeRequired=true` to fail instead.
+
 ## Windows
 
 Rust with the MSVC toolchain, Visual Studio Build Tools (C++ workload), Windows SDK and WDK (driver work), LLVM (for bindgen), `protoc`, FFmpeg development libraries (vcpkg or a shared build), Android platform-tools, Git.

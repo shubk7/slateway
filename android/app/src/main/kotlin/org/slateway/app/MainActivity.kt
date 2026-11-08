@@ -7,22 +7,30 @@ import android.content.Intent
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.view.View
 import android.widget.Button
 import android.widget.EditText
 import android.widget.TextView
 
 /**
  * Minimal development shell (docs/ROADMAP.md, M0): pick the host port,
- * connect through adb reverse, watch the handshake status.
+ * connect through adb reverse, confirm the pairing code, watch the
+ * handshake status.
  */
 class MainActivity : Activity() {
 
     private lateinit var status: TextView
+    private lateinit var pairButton: Button
     private val handler = Handler(Looper.getMainLooper())
 
     private val refreshStatus = object : Runnable {
         override fun run() {
             status.text = ConnectionService.statusText
+            val code = ConnectionService.pairing.code
+            pairButton.visibility = if (code != null) View.VISIBLE else View.GONE
+            if (code != null) {
+                pairButton.text = getString(R.string.pair, code)
+            }
             handler.postDelayed(this, STATUS_REFRESH_MS)
         }
     }
@@ -32,6 +40,11 @@ class MainActivity : Activity() {
         setContentView(R.layout.activity_main)
         status = findViewById(R.id.status)
         status.text = ConnectionService.statusText
+        pairButton = findViewById(R.id.pair)
+        pairButton.visibility = View.GONE
+        pairButton.setOnClickListener {
+            ConnectionService.pairing.confirm()
+        }
 
         val portField = findViewById<EditText>(R.id.port)
         portField.setText(ConnectionService.DEFAULT_PORT.toString())
@@ -47,6 +60,7 @@ class MainActivity : Activity() {
         }
 
         findViewById<Button>(R.id.disconnect).setOnClickListener {
+            ConnectionService.pairing.cancel()
             stopService(Intent(this, ConnectionService::class.java))
         }
     }

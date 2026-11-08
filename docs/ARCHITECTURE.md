@@ -26,6 +26,7 @@ crates/slateway-linux      Linux backends (cfg linux)
 crates/slatewayd           daemon binary
 crates/slateway-cli        control CLI
 android/                   Kotlin app, one module, packages per channel
+android/native/            Rust Noise facade (JNI), built with cargo-ndk (ADR-013)
 drivers/windows-idd/       C++ Indirect Display Driver
 tools/mock-tablet/         scripted tablet client for tests
 fuzz/                      cargo-fuzz targets

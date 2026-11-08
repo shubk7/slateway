@@ -20,7 +20,7 @@ Feature IDs are defined in `SCOPE.md`. Latency targets are hypotheses: measure f
 - [x] `slateway-proto`: frame codec, schemas, property tests, fuzz target
 - [x] `Transport` trait, adb-reverse transport, loopback transport
 - [x] Android shell: connect, foreground service, handshake
-- [ ] Noise handshake, pairing code, key storage
+- [x] Noise handshake, pairing code, key storage
 - [ ] Clock sync, stats, latency overlay plumbing
 - [ ] `tools/mock-tablet`
 

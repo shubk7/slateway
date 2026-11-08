@@ -76,13 +76,19 @@ jobs:
         with:
           distribution: temurin
           java-version: 21
-      # The android/ module arrives with its own M0 task; until then
-      # this job stays green and warns. Remove the guard once it lands.
-      - name: Build, unit-test and lint (skipped until android/ exists)
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk
+      # The runner image ships an NDK; cargo-ndk picks it up. Fail on a
+      # missing native build here, unlike local builds.
+      - name: Build, unit-test and lint
         run: |
           if [ -f android/gradlew ]; then
             cd android
-            ./gradlew assembleDebug testDebugUnitTest lintDebug
+            ./gradlew assembleDebug testDebugUnitTest lintDebug -Pslateway.nativeRequired=true
           else
             echo "::warning::android/ does not exist yet; gradle steps skipped (M0 task pending)"
           fi

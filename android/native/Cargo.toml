@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+[package]
+name = "slateway-native"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+publish = false
+description = "JNI facade over the Noise state machine for the Slateway tablet app."
+
+[lib]
+name = "slateway_native"
+crate-type = ["cdylib"]
+
+# Standalone crate: built by cargo-ndk for the app, not a member of the
+# root workspace (like fuzz/).
+[workspace]
+
+[dependencies]
+jni = "0.21"
+snow = "0.10"

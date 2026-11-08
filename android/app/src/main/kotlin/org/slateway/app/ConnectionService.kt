@@ -17,6 +17,8 @@ import java.io.DataInputStream
 import java.net.InetSocketAddress
 import java.net.ProtocolException
 import java.net.Socket
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /**
  * Foreground service holding the connection to the host daemon
@@ -58,54 +60,96 @@ class ConnectionService : Service() {
 
     private fun runSession(port: Int) {
         update("connecting to host…")
+        if (!NativeNoise.available) {
+            update("native Noise library missing (build needs cargo-ndk, see docs/DEVELOPMENT.md)")
+            stopSelf()
+            return
+        }
         try {
             Socket().use { s ->
                 synchronized(this) { socket = s }
                 s.connect(InetSocketAddress("127.0.0.1", port), CONNECT_TIMEOUT_MS)
                 s.tcpNoDelay = true
                 s.soTimeout = HANDSHAKE_TIMEOUT_MS
-
-                update("sending Hello")
-                val appVersion = packageManager.getPackageInfo(packageName, 0).versionName ?: "0.1.0"
-                val hello = buildHello(
-                    appVersion = appVersion,
-                    deviceModel = android.os.Build.MODEL ?: "unknown",
-                    androidApi = android.os.Build.VERSION.SDK_INT,
-                )
-                writeFrame(s, Frame(Protocol.CHANNEL_CONTROL, 0, Protocol.HELLO_TYPE, hello.toByteArray(), 0))
-
                 val input = DataInputStream(BufferedInputStream(s.getInputStream()))
-                val ackFrame = Frame.readFrom(input)
-                if (ackFrame.channel != Protocol.CHANNEL_CONTROL || ackFrame.type != Protocol.HELLO_ACK_TYPE) {
-                    throw ProtocolException(
-                        "expected HelloAck, got channel ${ackFrame.channel} type ${ackFrame.type}"
-                    )
-                }
-                val ack = HelloAck.parseFrom(ackFrame.payload)
-                if (ack.protocolMajor != Protocol.PROTOCOL_MAJOR) {
-                    writeFrame(
-                        s,
-                        Frame(
-                            Protocol.CHANNEL_CONTROL, 0, Protocol.CLOSE_TYPE,
-                            Close.newBuilder()
-                                .setReason(CloseReason.MAJOR_MISMATCH)
-                                .build()
-                                .toByteArray(),
-                            0,
-                        ),
-                    )
-                    throw ProtocolException(
-                        "host protocol major ${ack.protocolMajor} does not match ${Protocol.PROTOCOL_MAJOR}"
-                    )
-                }
+                val output = s.getOutputStream()
 
-                s.soTimeout = 0
-                update("handshake complete" + ack.appVersion.takeIf { it.isNotEmpty() }?.let { " with $it" }.orEmpty())
+                update("handshaking")
+                val privateKey = TabletKeys.loadOrCreatePrivateKey(this)
+                val deviceName = android.os.Build.MODEL ?: "tablet"
+                NoiseSession.initiator(privateKey).use { noise ->
+                    // XX over Noise records (docs/PROTOCOL.md): -> e,
+                    // <- e, ee, s, es, -> s, se. Message sizes are
+                    // never assumed; records are length-driven.
+                    writeRecord(output, noise.writeMessage(ByteArray(0)))
+                    val record = ByteArray(Protocol.MAX_RECORD)
+                    var len = readRecord(input, record)
+                    noise.readMessage(record.copyOf(len))
+                    writeRecord(output, noise.writeMessage(deviceName.toByteArray()))
 
-                // The M0 shell holds the session open and discards
-                // further frames; the daemon drives the echo.
-                while (true) {
-                    Frame.readFrom(input)
+                    val hostKey = noise.remoteStatic()
+                        ?: throw ProtocolException("host static key unknown after XX")
+                    val code = pairingCode(noise.handshakeHash())
+                    val stored = TabletKeys.knownHost(this)
+                    if (stored == null) {
+                        update("pairing: confirm code $code on host and tablet")
+                        requestPairing(code)
+                    } else if (!stored.contentEquals(hostKey)) {
+                        // A changed key for a known device is a hard
+                        // failure (docs/SECURITY.md).
+                        throw ProtocolException("host key changed; re-pairing required")
+                    }
+                    noise.intoTransport()
+
+                    // Encrypted control frames from here on.
+                    val channel = SecureChannel(noise)
+                    val hello = buildHello(
+                        appVersion = packageManager.getPackageInfo(packageName, 0).versionName ?: "0.1.0",
+                        deviceModel = deviceName,
+                        androidApi = android.os.Build.VERSION.SDK_INT,
+                    )
+                    val helloBytes = hello.toByteArray()
+                    channel.writeFrame(
+                        output,
+                        FrameHeader(Protocol.CHANNEL_CONTROL, 0, Protocol.HELLO_TYPE, helloBytes.size, 0),
+                        helloBytes,
+                    )
+                    val (ackFrame, ackPayload) = channel.readFrame(input)
+                    if (ackFrame.channel != Protocol.CHANNEL_CONTROL || ackFrame.type != Protocol.HELLO_ACK_TYPE) {
+                        throw ProtocolException(
+                            "expected HelloAck, got channel ${ackFrame.channel} type ${ackFrame.type}"
+                        )
+                    }
+                    val ack = HelloAck.parseFrom(ackPayload)
+                    if (ack.protocolMajor != Protocol.PROTOCOL_MAJOR) {
+                        val close = Close.newBuilder()
+                            .setReason(CloseReason.MAJOR_MISMATCH)
+                            .build()
+                            .toByteArray()
+                        channel.writeFrame(
+                            output,
+                            FrameHeader(Protocol.CHANNEL_CONTROL, 0, Protocol.CLOSE_TYPE, close.size, 0),
+                            close,
+                        )
+                        throw ProtocolException(
+                            "host protocol major ${ack.protocolMajor} does not match ${Protocol.PROTOCOL_MAJOR}"
+                        )
+                    }
+                    if (stored == null) {
+                        // Pairing was confirmed; remember the host.
+                        TabletKeys.storeHost(this, hostKey)
+                    }
+
+                    s.soTimeout = 0
+                    update(
+                        "handshake complete" + ack.appVersion.takeIf { it.isNotEmpty() }?.let { " with $it" }.orEmpty()
+                    )
+
+                    // The M0 shell holds the session open and discards
+                    // further frames; the daemon drives the echo.
+                    while (true) {
+                        channel.readFrame(input)
+                    }
                 }
             }
         } catch (e: Exception) {
@@ -119,10 +163,30 @@ class ConnectionService : Service() {
         }
     }
 
-    private fun writeFrame(socket: Socket, frame: Frame) {
-        socket.getOutputStream().apply {
-            write(frame.encode())
-            flush()
+    /**
+     * Blocks until the user confirms or cancels the pairing prompt in
+     * the activity, or until the timeout runs out (docs/SECURITY.md:
+     * the code is confirmed on the host and on the tablet).
+     */
+    private fun requestPairing(code: String) {
+        val latch = CountDownLatch(1)
+        synchronized(pairing) {
+            pairing.code = code
+            pairing.latch = latch
+        }
+        val confirmed: Boolean
+        try {
+            confirmed = latch.await(PAIRING_TIMEOUT_MS, TimeUnit.MILLISECONDS) && pairing.confirmed
+        } catch (_: InterruptedException) {
+            throw ProtocolException("pairing was interrupted")
+        } finally {
+            synchronized(pairing) {
+                pairing.code = null
+                pairing.latch = null
+            }
+        }
+        if (!confirmed) {
+            throw ProtocolException("pairing was not confirmed")
         }
     }
 
@@ -158,11 +222,43 @@ class ConnectionService : Service() {
         private const val NOTIFICATION_ID = 1
         private const val CONNECT_TIMEOUT_MS = 5000
         private const val HANDSHAKE_TIMEOUT_MS = 5000
+        private const val PAIRING_TIMEOUT_MS = 120_000L
 
-        /** Connection status for the activity; contents never include
-         * frame or input data (docs/SECURITY.md). */
+        /**
+         * Pairing prompt state; the activity reads `code` and calls
+         * [PairingState.confirm]. Contents never include frame or
+         * input data (docs/SECURITY.md).
+         */
+        val pairing = PairingState()
+
+        /** Connection status for the activity. */
         @Volatile
         var statusText: String = "disconnected"
             private set
+    }
+
+    /** The pending pairing prompt, if any. */
+    class PairingState {
+        /** The 6-digit code while a prompt is pending, else null. */
+        @Volatile
+        var code: String? = null
+            internal set
+
+        @Volatile
+        internal var confirmed = false
+
+        @Volatile
+        internal var latch: CountDownLatch? = null
+
+        /** The user confirmed the code on this tablet. */
+        fun confirm() {
+            confirmed = true
+            latch?.countDown()
+        }
+
+        /** The user dismissed the prompt. */
+        fun cancel() {
+            latch?.countDown()
+        }
     }
 }
