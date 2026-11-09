@@ -90,16 +90,25 @@ async fn run() -> Result<(), String> {
     loop {
         // One transport per connection: the loopback transport hands
         // its listener over on accept, and adb reverse is re-registered
-        // per connection (the tunnel drops with the device).
+        // per connection (the tunnel drops with the device). Setup
+        // failures (cable pulled, adb still catching up) are logged and
+        // retried, never fatal.
+        println!(
+            "waiting for the tablet ({:?} transport, port {})…",
+            args.transport, args.port
+        );
         let mut transport: Box<dyn Transport> = match args.transport {
             TransportChoice::Loopback => Box::new(LoopbackTransport::with_port(args.port)),
             TransportChoice::Adb => Box::new(AdbReverseTransport::with_port(args.port)),
         };
-        let addr = transport.prepare().await.map_err(|err| err.to_string())?;
-        if let Some(addr) = addr {
-            println!("slatewayd: waiting for the tablet on {addr}");
-        }
-        let stream = transport.stream().await.map_err(|err| err.to_string())?;
+        let stream = match setup_transport(&mut *transport).await {
+            Ok(stream) => stream,
+            Err(err) => {
+                eprintln!("transport setup failed: {err}; retrying in 2 s");
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                continue;
+            }
+        };
         let auto_pair = args.auto_pair;
         let confirm = move |code: &str| {
             if auto_pair {
@@ -128,6 +137,18 @@ async fn run() -> Result<(), String> {
             ),
             Err(err) => eprintln!("session failed: {err}"),
         }
+        println!("tablet disconnected; waiting…");
         // Reconnect loop: the tablet may return without a new process.
     }
+}
+
+/// Prepares the transport and waits for the tablet's connection.
+async fn setup_transport(
+    transport: &mut dyn Transport,
+) -> Result<Box<dyn slateway_platform::transport::AsyncReadWrite>, String> {
+    let addr = transport.prepare().await.map_err(|err| err.to_string())?;
+    if let Some(addr) = addr {
+        println!("listening on {addr}");
+    }
+    transport.stream().await.map_err(|err| err.to_string())
 }

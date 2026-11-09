@@ -154,10 +154,14 @@ class ConnectionService : Service() {
                     // The M0 shell answers clock-sync pings and holds
                     // the session open; the daemon drives the echo.
                     while (true) {
-                        val now = android.os.SystemClock.elapsedRealtimeNanos() / 1000
                         val (frame, payload) = channel.readFrame(input)
                         if (frame.channel == Protocol.CHANNEL_CONTROL && frame.type == Protocol.PING_TYPE) {
-                            val pong = buildPong(payload, now, android.os.SystemClock.elapsedRealtimeNanos() / 1000)
+                            // t1 stamps the ping's arrival and t2 the
+                            // reply's send; stamping t1 any earlier
+                            // would count idle waiting into the host's
+                            // RTT math (docs/PROTOCOL.md, "Clocks").
+                            val t1 = android.os.SystemClock.elapsedRealtimeNanos() / 1000
+                            val pong = buildPong(payload, t1, android.os.SystemClock.elapsedRealtimeNanos() / 1000)
                             channel.writeFrame(
                                 output,
                                 FrameHeader(Protocol.CHANNEL_CONTROL, 0, Protocol.PONG_TYPE, pong.size, 0),

@@ -144,9 +144,14 @@ impl Drop for AdbReverseTransport {
         // Best effort, detached: teardown must never block on adb, so
         // the child is spawned and not waited on (a short-lived zombie
         // is acceptable; the explicit `cleanup` is the reliable path).
+        // Its output is silenced so a failing remove does not scribble
+        // over the terminal after shutdown.
         let tcp = format!("tcp:{}", self.port);
+        use std::process::Stdio;
         let _ = process::Command::new(&self.adb_path)
             .args(["reverse", "--remove", &tcp])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .spawn();
     }
 }
