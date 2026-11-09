@@ -9,6 +9,19 @@ android {
     namespace = "org.slateway.app"
     compileSdk = 35
 
+    signingConfigs {
+        // Shared debug keystore (checked in, NOT a secret - debug keys
+        // are public by definition): every machine signs the debug APK
+        // identically, so an APK built on one OS installs over the
+        // other's without an uninstall dance.
+        getByName("debug") {
+            storeFile = rootProject.file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
     defaultConfig {
         applicationId = "org.slateway.app" // docs/DECISIONS.md ADR-011
         minSdk = 29 // docs/DECISIONS.md ADR-009
