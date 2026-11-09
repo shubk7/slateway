@@ -36,11 +36,17 @@ class ConnectionService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val port = intent?.getIntExtra(EXTRA_PORT, Protocol.DEFAULT_PORT) ?: Protocol.DEFAULT_PORT
-        startForeground(
-            NOTIFICATION_ID,
-            notification(statusText),
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE,
-        )
+        if (android.os.Build.VERSION.SDK_INT >= 34) {
+            startForeground(
+                NOTIFICATION_ID,
+                notification(statusText),
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
+            )
+        } else {
+            // Types are not enforced below Android 14; the two-argument
+            // call avoids passing a constant the platform does not know.
+            startForeground(NOTIFICATION_ID, notification(statusText))
+        }
         if (!running) {
             running = true
             Thread { runSession(port) }.start()
