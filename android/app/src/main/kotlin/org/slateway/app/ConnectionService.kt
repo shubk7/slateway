@@ -104,6 +104,10 @@ class ConnectionService : Service() {
                         update("pairing: confirm code $code on host and tablet")
                         requestPairing(code)
                     }
+                    // The pairing wait is human-paced; the protocol
+                    // exchange resumes without a read deadline. A cable
+                    // pull still surfaces as an EOF.
+                    s.soTimeout = 0
                     noise.intoTransport()
 
                     // Encrypted control frames from here on.
@@ -146,7 +150,6 @@ class ConnectionService : Service() {
                         TabletKeys.trustHost(this, hostKey)
                     }
 
-                    s.soTimeout = 0
                     update(
                         "handshake complete" + ack.appVersion.takeIf { it.isNotEmpty() }?.let { " with $it" }.orEmpty()
                     )

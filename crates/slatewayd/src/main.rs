@@ -115,9 +115,25 @@ async fn run() -> Result<(), String> {
                 println!("pairing request: code {code} - auto-paired (--auto-pair)");
                 return true;
             }
-            println!("pairing request: code {code} - confirm on the tablet, then enter y here");
-            let mut line = String::new();
-            std::io::stdin().read_line(&mut line).is_ok() && line.trim().eq_ignore_ascii_case("y")
+            // Stray keystrokes re-prompt instead of killing the
+            // session; the tablet may already be showing its side of
+            // the code. Three tries, then the pairing is refused.
+            for attempt in 1..=3 {
+                println!(
+                    "pairing request: code {code} - confirm on the tablet, then enter y here ({attempt}/3)"
+                );
+                let mut line = String::new();
+                match std::io::stdin().read_line(&mut line) {
+                    Ok(0) => return false, // stdin closed
+                    Ok(_) => match line.trim().to_ascii_lowercase().as_str() {
+                        "y" | "yes" => return true,
+                        "n" | "no" => return false,
+                        _ => println!("enter y (confirm) or n (refuse)"),
+                    },
+                    Err(_) => return false,
+                }
+            }
+            false
         };
         match session::serve_once(stream, &host_key.private, &mut known, &cfg, &confirm).await {
             Ok(report) => println!(
