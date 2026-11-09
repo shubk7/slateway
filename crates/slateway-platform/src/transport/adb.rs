@@ -5,7 +5,7 @@
 //! loopback over the USB link, then accepts the connection. Needs USB
 //! debugging on the tablet (`docs/DEVELOPMENT.md`, "Tablet setup").
 
-use std::{net::SocketAddr, path::PathBuf, process};
+use std::{net::SocketAddr, path::PathBuf, process, process::Stdio};
 
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -30,7 +30,13 @@ struct SystemAdb {
 #[async_trait]
 impl AdbRunner for SystemAdb {
     async fn run(&self, args: &[String], step: &'static str) -> Result<(), TransportError> {
-        let status = Command::new(&self.path).args(args).status().await?;
+        // adb's stdout is noise (some versions echo the forwarded port
+        // on a successful reverse); stderr stays visible for errors.
+        let status = Command::new(&self.path)
+            .args(args)
+            .stdout(Stdio::null())
+            .status()
+            .await?;
         if !status.success() {
             return Err(TransportError::Adb {
                 step,
@@ -147,7 +153,6 @@ impl Drop for AdbReverseTransport {
         // Its output is silenced so a failing remove does not scribble
         // over the terminal after shutdown.
         let tcp = format!("tcp:{}", self.port);
-        use std::process::Stdio;
         let _ = process::Command::new(&self.adb_path)
             .args(["reverse", "--remove", &tcp])
             .stdout(Stdio::null())
