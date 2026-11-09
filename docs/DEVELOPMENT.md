@@ -29,6 +29,16 @@ cargo install cargo-ndk
 
 Rust with the MSVC toolchain, Visual Studio Build Tools (C++ workload), Windows SDK and WDK (driver work), LLVM (for bindgen), `protoc`, FFmpeg development libraries (vcpkg or a shared build), Android platform-tools, Git.
 
+Windows-specific notes from the M0 bring-up:
+
+- In PowerShell, quote Gradle's property arguments (the dot gets split
+  otherwise): `.\gradlew.bat assembleDebug "-Pslateway.nativeRequired=true"`.
+- Run the cargo commands from the repo root; `cargo deny check` does
+  not walk up from a subdirectory the way the other cargo commands do.
+- The daemon's config directory is `%APPDATA%\slateway`
+  (`known-tablets` and `host.key`); pairing is per host, so a tablet
+  paired on Linux pairs again on Windows.
+
 ## Tablet setup
 
 1. Enable Developer options (tap Build number 7 times), then USB debugging.
