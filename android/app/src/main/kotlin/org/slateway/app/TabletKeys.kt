@@ -21,7 +21,7 @@ import javax.crypto.spec.GCMParameterSpec
 object TabletKeys {
     private const val WRAP_ALIAS = "slateway-noise-wrap"
     private const val KEY_FILE = "noise.key"
-    private const val HOST_FILE = "known-host"
+    private const val HOST_FILE = "known-hosts"
     private const val KEY_BITS = 256
     private const val NONCE_BYTES = 12
     private const val KEY_BYTES = 32
@@ -42,24 +42,47 @@ object TabletKeys {
         return private
     }
 
-    /** The paired host's static public key, or null before pairing. */
-    fun knownHost(context: Context): ByteArray? {
-        val file = File(context.filesDir, HOST_FILE)
-        if (!file.exists()) return null
-        val key = file.readBytes()
-        require(key.size == KEY_BYTES) { "stored host key has ${key.size} bytes" }
-        return key
-    }
-
-    /** Stores the host's public key once pairing is confirmed. */
-    fun storeHost(context: Context, publicKey: ByteArray) {
+    /** Whether this host's static public key is in the trusted set.
+     * Unknown hosts simply restart pairing; there is no single-host
+     * pin, so a tablet moves between hosts freely. */
+    fun isTrustedHost(context: Context, publicKey: ByteArray): Boolean {
         require(publicKey.size == KEY_BYTES) { "host key must be $KEY_BYTES bytes" }
-        File(context.filesDir, HOST_FILE).writeBytes(publicKey)
+        return hostKeysFile(context).readLines().any { line ->
+            hexToBytes(line.trim())?.contentEquals(publicKey) == true
+        }
     }
 
-    /** Forgets the paired host; the next connection pairs again. */
-    fun forgetHost(context: Context) {
-        File(context.filesDir, HOST_FILE).delete()
+    /** Adds a host's public key to the trusted set once pairing is
+     * confirmed; duplicates are ignored. */
+    fun trustHost(context: Context, publicKey: ByteArray) {
+        require(publicKey.size == KEY_BYTES) { "host key must be $KEY_BYTES bytes" }
+        if (isTrustedHost(context, publicKey)) return
+        hostKeysFile(context).appendText(hexEncode(publicKey) + "\n")
+    }
+
+    /** Forgets every trusted host; the next connection pairs again. */
+    fun forgetHosts(context: Context) {
+        hostKeysFile(context).delete()
+    }
+
+    private fun hostKeysFile(context: Context): File = File(context.filesDir, HOST_FILE)
+
+    private fun hexToBytes(text: String): ByteArray? {
+        if (text.length != 2 * KEY_BYTES) return null
+        return try {
+            val out = ByteArray(KEY_BYTES)
+            for (i in 0 until KEY_BYTES) {
+                out[i] = ((Character.digit(text[2 * i], 16) shl 4)
+                    + Character.digit(text[2 * i + 1], 16)).toByte()
+            }
+            out
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun hexEncode(bytes: ByteArray): String = buildString {
+        for (byte in bytes) append("%02x".format(byte))
     }
 
     private fun wrapKey(): SecretKey {

@@ -96,14 +96,13 @@ class ConnectionService : Service() {
                     val hostKey = noise.remoteStatic()
                         ?: throw ProtocolException("host static key unknown after XX")
                     val code = pairingCode(noise.handshakeHash())
-                    val stored = TabletKeys.knownHost(this)
-                    if (stored == null) {
+                    val trusted = TabletKeys.isTrustedHost(this, hostKey)
+                    if (!trusted) {
+                        // An unknown host restarts pairing
+                        // (docs/SECURITY.md): the code match on both
+                        // screens is the anti-MITM check.
                         update("pairing: confirm code $code on host and tablet")
                         requestPairing(code)
-                    } else if (!stored.contentEquals(hostKey)) {
-                        // A changed key for a known device is a hard
-                        // failure (docs/SECURITY.md).
-                        throw ProtocolException("host key changed; re-pairing required")
                     }
                     noise.intoTransport()
 
@@ -141,9 +140,10 @@ class ConnectionService : Service() {
                             "host protocol major ${ack.protocolMajor} does not match ${Protocol.PROTOCOL_MAJOR}"
                         )
                     }
-                    if (stored == null) {
-                        // Pairing was confirmed; remember the host.
-                        TabletKeys.storeHost(this, hostKey)
+                    if (!trusted) {
+                        // Pairing was confirmed; trust this host from
+                        // now on.
+                        TabletKeys.trustHost(this, hostKey)
                     }
 
                     s.soTimeout = 0

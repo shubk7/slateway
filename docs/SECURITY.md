@@ -19,8 +19,8 @@ Noise_XX over the byte stream, with static keys per device. Always on, including
 
 1. First connection runs the handshake with unknown keys.
 2. Both sides derive a 6-digit code from the handshake hash. The user confirms it matches on the host prompt and on the tablet.
-3. The host stores the tablet's public key and name. The tablet stores the host's key, with its own private key wrapped by the Android Keystore.
-4. Later connections require the pinned key. An unknown key restarts pairing; a changed key for a known device is a hard failure with a warning.
+3. The host stores the tablet's public key and name; a known tablet presenting a changed key is a hard failure. The tablet stores the keys of the hosts it has paired with - an unknown host restarts pairing - with its own private key wrapped by the Android Keystore.
+4. Later connections require the pinned key.
 
 ## Consent
 
