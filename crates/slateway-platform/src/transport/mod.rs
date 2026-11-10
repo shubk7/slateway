@@ -39,18 +39,27 @@ pub enum TransportError {
     /// Binding, accepting or dialing failed.
     #[error(transparent)]
     Io(#[from] io::Error),
-    /// An adb command failed. The exit code is carried for
-    /// programmatic use; adb's output is not logged.
-    #[error("adb {step} failed")]
+    /// An adb command failed. The exit code is carried for programmatic
+    /// use, plus the last line of adb's stderr as context: the daemon
+    /// retries the tunnel registration periodically, so its own error
+    /// line must say why without adb scribbling on the terminal.
+    #[error(
+        "adb {step} failed{detail}",
+        detail = .detail
+            .as_ref()
+            .map(|text| format!(": {text}"))
+            .unwrap_or_default()
+    )]
     Adb {
         /// Which adb invocation failed ("reverse", "reverse --remove").
         step: &'static str,
         /// Exit code, if the process reported one.
         code: Option<i32>,
+        /// Last non-empty line of adb's stderr, if it printed one.
+        detail: Option<String>,
     },
-    /// [`Transport::stream`] was called before [`Transport::prepare`],
-    /// or a second time.
-    #[error("transport is not ready: prepare must run once before stream")]
+    /// [`Transport::stream`] was called before [`Transport::prepare`].
+    #[error("transport is not ready: prepare must run before stream")]
     NotReady,
 }
 
@@ -63,12 +72,15 @@ pub trait Transport: Send {
     /// listen transports; `None` will be the answer of the dial
     /// transports (USB tethering, AOA) that arrive later.
     ///
-    /// Call once, before [`Transport::stream`].
+    /// Idempotent: a bound listener stays bound and the tunnel is
+    /// (re-)registered on every call, so the daemon can refresh the
+    /// registration while idle - the adb reverse rule dies with the
+    /// USB connection.
     async fn prepare(&mut self) -> Result<Option<SocketAddr>, TransportError>;
 
     /// Produces the duplex byte stream to the tablet, waiting for the
     /// connection (accept or dial) as the transport requires. Call
-    /// after [`Transport::prepare`]; a second call reports
-    /// [`TransportError::NotReady`].
+    /// after [`Transport::prepare`]; repeatable - each call accepts
+    /// one connection while the listener keeps serving.
     async fn stream(&mut self) -> Result<BoxStream, TransportError>;
 }

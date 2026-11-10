@@ -2,3 +2,4 @@
 
 # Rust build artifacts (never shared across OSes, see docs/DEVELOPMENT.md)
 /target/
+log

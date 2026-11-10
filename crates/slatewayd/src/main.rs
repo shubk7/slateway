@@ -8,7 +8,18 @@ pub mod session;
 
 use slateway_core::keys::{KnownTablets, config_dir, load_or_create_host_key};
 use slateway_platform::{AdbReverseTransport, DEFAULT_PORT, LoopbackTransport, Transport};
+use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// How long an idle accept wait runs before the loop cycles: while no
+/// session holds the tunnel, the adb reverse registration is refreshed
+/// on every cycle because the rule dies with the USB connection (a
+/// tablet reconnecting after a replug must find it live again).
+const TUNNEL_REFRESH: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Delay before retrying a failed transport setup or accept.
+const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
 
 #[tokio::main]
 async fn main() {
@@ -89,43 +100,59 @@ async fn run() -> Result<(), String> {
 
     // One persistent transport: the listener stays bound across
     // sessions (a tablet reconnecting while a pairing prompt is open
-    // must not dial a dead port) and adb reverse is re-registered per
-    // iteration because the tunnel drops with the device.
+    // must not dial a dead port).
     let mut transport: Box<dyn Transport> = match args.transport {
         TransportChoice::Loopback => Box::new(LoopbackTransport::with_port(args.port)),
         TransportChoice::Adb => Box::new(AdbReverseTransport::with_port(args.port)),
     };
     let known: session::SharedTablets = Arc::new(tokio::sync::Mutex::new(known));
+    // Live session count. While zero, the loop refreshes the adb
+    // reverse registration every cycle (cable replug drops the rule);
+    // while a session holds the link, the tunnel is proven alive, so
+    // the loop just keeps cycling without touching adb.
+    let sessions = Arc::new(AtomicUsize::new(0));
+    let mut announced: Option<SocketAddr> = None;
+    println!(
+        "waiting for the tablet ({:?} transport, port {})…",
+        args.transport, args.port
+    );
 
     loop {
-        println!(
-            "waiting for the tablet ({:?} transport, port {})…",
-            args.transport, args.port
-        );
-        match transport.prepare().await {
-            Ok(Some(addr)) => println!("listening on {addr}"),
-            Ok(None) => {}
-            Err(err) => {
-                eprintln!("transport setup failed: {err}; retrying in 2 s");
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                continue;
+        if sessions.load(Ordering::Relaxed) == 0 {
+            match transport.prepare().await {
+                Ok(Some(addr)) => {
+                    if announced != Some(addr) {
+                        println!("listening on {addr}");
+                        announced = Some(addr);
+                    }
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    eprintln!("transport setup failed: {err}; retrying in 2 s");
+                    tokio::time::sleep(RETRY_DELAY).await;
+                    continue;
+                }
             }
         }
-        let stream = match transport.stream().await {
-            Ok(stream) => stream,
-            Err(err) => {
+        // Bounded accept so the loop keeps cycling even while waiting.
+        let stream = match tokio::time::timeout(TUNNEL_REFRESH, transport.stream()).await {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(err)) => {
                 eprintln!("accept failed: {err}; retrying in 2 s");
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                tokio::time::sleep(RETRY_DELAY).await;
                 continue;
             }
+            Err(_elapsed) => continue,
         };
         eprintln!("session: tablet connected");
+        sessions.fetch_add(1, Ordering::Relaxed);
         // The session runs as its own task: the loop returns to accept
         // immediately, so a pairing prompt never freezes the daemon.
         let known = Arc::clone(&known);
         let cfg = cfg.clone();
         let host_private = host_key.private;
         let auto_pair = args.auto_pair;
+        let sessions = Arc::clone(&sessions);
         tokio::spawn(async move {
             let confirm = move |code: &str| {
                 if auto_pair {
@@ -171,6 +198,7 @@ async fn run() -> Result<(), String> {
                 ),
                 Err(err) => eprintln!("session failed: {err}"),
             }
+            sessions.fetch_sub(1, Ordering::Relaxed);
             eprintln!("session: tablet disconnected; waiting for the next connection");
         });
         // Reconnect loop: the tablet may return without a new process.

@@ -31,16 +31,32 @@ struct SystemAdb {
 impl AdbRunner for SystemAdb {
     async fn run(&self, args: &[String], step: &'static str) -> Result<(), TransportError> {
         // adb's stdout is noise (some versions echo the forwarded port
-        // on a successful reverse); stderr stays visible for errors.
-        let status = Command::new(&self.path)
+        // on a successful reverse); stderr is captured instead of
+        // inherited because the daemon retries the tunnel registration
+        // periodically and one self-contained error line beats adb
+        // scribbling on the terminal every 2 s.
+        let output = Command::new(&self.path)
             .args(args)
             .stdout(Stdio::null())
-            .status()
+            .output()
             .await?;
-        if !status.success() {
+        if !output.status.success() {
+            let detail = String::from_utf8_lossy(&output.stderr)
+                .lines()
+                .rev()
+                .find(|line| !line.trim().is_empty())
+                .map(|line| {
+                    let line = line.trim();
+                    let mut truncated: String = line.chars().take(120).collect();
+                    if truncated.chars().count() < line.chars().count() {
+                        truncated.push('…');
+                    }
+                    truncated
+                });
             return Err(TransportError::Adb {
                 step,
-                code: status.code(),
+                code: output.status.code(),
+                detail,
             });
         }
         Ok(())
@@ -213,6 +229,7 @@ mod tests {
                 Err(TransportError::Adb {
                     step,
                     code: Some(self.code),
+                    detail: None,
                 })
             }
         }
@@ -276,7 +293,8 @@ mod tests {
             transport.prepare().await,
             Err(TransportError::Adb {
                 step: "reverse",
-                code: Some(3)
+                code: Some(3),
+                ..
             })
         ));
     }

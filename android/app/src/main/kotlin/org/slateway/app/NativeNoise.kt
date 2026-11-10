@@ -38,7 +38,9 @@ object NativeNoise {
 
     external fun decrypt(ptr: Long, ciphertext: ByteArray): ByteArray
 
-    external fun free(ptr: Long)
+    /** Releases a session; the pointer must never be used again. The
+     * name matches the JNI export `freeSession` in android/native. */
+    external fun freeSession(ptr: Long)
 }
 
 /**
@@ -78,7 +80,7 @@ class NoiseSession private constructor(@Volatile private var ptr: Long) : AutoCl
         val current = ptr
         if (current != 0L) {
             ptr = 0
-            NativeNoise.free(current)
+            NativeNoise.freeSession(current)
         }
     }
 
