@@ -4,6 +4,7 @@
 //! pairing, Hello/HelloAck, clock sync and the echo of experimental
 //! channel frames. Capture and encoding arrive in M1.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use prost::Message;
@@ -20,6 +21,12 @@ use slateway_proto::control::{
 };
 use slateway_proto::frame::FrameHeader;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::sync::Mutex;
+
+/// Tablet registry shared across sessions: sessions run as tasks (a
+/// pairing prompt must not freeze the accept loop), so the registry is
+/// behind an async mutex instead of an exclusive borrow.
+pub type SharedTablets = Arc<Mutex<KnownTablets>>;
 
 /// Session behaviour knobs.
 #[derive(Clone, Debug)]
@@ -73,10 +80,14 @@ pub enum SessionFailure {
 /// `confirm` is consulted for unknown tablets with the 6-digit code;
 /// returning true pairs and stores the tablet. The M0 exit criteria
 /// (echo with RTT and clock offset) read from the returned report.
+///
+/// Stage diagnostics go to stderr (`session: …`); stdout stays for the
+/// operator-facing prompts and reports. Frames and payloads are never
+/// logged (docs/SECURITY.md).
 pub async fn serve_once<S>(
     mut stream: S,
     host_private: &[u8; KEY_LEN],
-    known: &mut KnownTablets,
+    known: &SharedTablets,
     cfg: &SessionConfig,
     confirm: &(dyn Fn(&str) -> bool + Send + Sync),
 ) -> Result<SessionReport, SessionFailure>
@@ -94,24 +105,40 @@ where
     } else {
         device_name
     };
+    eprintln!("session: noise handshake complete, device '{device_name}'");
 
     let mut report = SessionReport::default();
     let mut session = done.session;
-    match known.find(&remote_static) {
-        Some(tablet) => report.device_name = tablet.name.clone(),
+    // Lock only around the registry access, never across the (blocking,
+    // human-paced) confirm prompt.
+    let known_name = known
+        .lock()
+        .await
+        .find(&remote_static)
+        .map(|tablet| tablet.name.clone());
+    match known_name {
+        Some(name) => {
+            eprintln!("session: tablet is known ('{name}')");
+            report.device_name = name;
+        }
         None => {
             let code = slateway_core::pairing_code(&done.handshake_hash);
+            eprintln!("session: unknown tablet, pairing required");
             if !confirm(&code) {
+                eprintln!("session: pairing refused");
                 return Err(SessionFailure::Pairing(
                     "the operator did not confirm the code",
                 ));
             }
             known
+                .lock()
+                .await
                 .insert(KnownTablet {
                     public: remote_static,
                     name: device_name.clone(),
                 })
                 .map_err(|_err| SessionFailure::Pairing("could not store the paired tablet"))?;
+            eprintln!("session: tablet '{device_name}' paired and stored");
             report.paired = true;
             report.device_name = device_name.clone();
         }
@@ -140,6 +167,10 @@ where
         .await?;
         return Err(SessionError::Protocol("protocol major mismatch").into());
     }
+    eprintln!(
+        "session: hello from '{}' (app '{}', android api {})",
+        hello.device_model, hello.app_version, hello.android_api
+    );
     let ack = HelloAck {
         protocol_major: slateway_proto::control::PROTOCOL_MAJOR,
         protocol_minor: slateway_proto::control::PROTOCOL_MINOR,
@@ -155,6 +186,7 @@ where
     let mut clock = ClockSync::default();
     let mut stats = SessionStats::default();
     let mut next_ping = tokio::time::Instant::now() + cfg.tick;
+    let mut clock_announced = false;
     loop {
         let read = tokio::time::timeout_at(next_ping, session.read_frame(&mut scratch)).await;
         match read {
@@ -167,6 +199,7 @@ where
                 if is_disconnect(&err) {
                     // The tablet went away (clean EOF or reset): the
                     // session ends and the report still counts.
+                    eprintln!("session: tablet closed the connection");
                     break;
                 }
                 return Err(err.into());
@@ -178,13 +211,20 @@ where
                     (Channel::Control, PONG_TYPE) => {
                         let pong = Pong::decode(payload)?;
                         clock.on_pong(pong.t0, pong.t1, pong.t2, monotonic_us());
+                        if let (false, Some(estimate)) = (clock_announced, clock.estimate()) {
+                            clock_announced = true;
+                            eprintln!("session: clock sync live (rtt {} us)", estimate.rtt_us);
+                        }
                     }
                     (Channel::Control, STATS_TYPE) => {
                         if let Ok(stats_msg) = Stats::decode(payload) {
                             stats.record_tablet(stats_msg);
                         }
                     }
-                    (Channel::Control, CLOSE_TYPE) => break,
+                    (Channel::Control, CLOSE_TYPE) => {
+                        eprintln!("session: tablet sent Close");
+                        break;
+                    }
                     (Channel::Control, HELLO_TYPE) => {
                         return Err(SessionError::Protocol("unexpected duplicate Hello").into());
                     }
@@ -289,7 +329,9 @@ mod tests {
     #[tokio::test]
     async fn echo_session_with_the_mock_tablet() {
         let dir = TempDir::new().unwrap();
-        let mut known = KnownTablets::load(&dir.path().join("known-tablets")).unwrap();
+        let known: SharedTablets = Arc::new(Mutex::new(
+            KnownTablets::load(&dir.path().join("known-tablets")).unwrap(),
+        ));
         let (host_priv, _) = generate_keypair().unwrap();
         let host_priv: [u8; KEY_LEN] = host_priv.as_slice().try_into().unwrap();
 
@@ -300,7 +342,7 @@ mod tests {
                 tick: Duration::from_millis(20),
             };
             let confirm = |_code: &str| true;
-            serve_once(a, &host_priv, &mut known, &cfg, &confirm).await
+            serve_once(a, &host_priv, &known, &cfg, &confirm).await
         });
 
         let client_cfg = ClientConfig {
@@ -342,7 +384,7 @@ mod tests {
     async fn known_tablet_is_not_paired_again() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("known-tablets");
-        let mut known = KnownTablets::load(&path).unwrap();
+        let known: SharedTablets = Arc::new(Mutex::new(KnownTablets::load(&path).unwrap()));
         let (host_priv, _) = generate_keypair().unwrap();
         let host_priv: [u8; KEY_LEN] = host_priv.as_slice().try_into().unwrap();
         let (tablet_priv, _) = generate_keypair().unwrap();
@@ -364,7 +406,7 @@ mod tests {
         };
         let client = run_client(&client_cfg, b);
         let confirm = |_code: &str| true;
-        let server = serve_once(a, &host_priv, &mut known, &cfg, &confirm);
+        let server = serve_once(a, &host_priv, &known, &cfg, &confirm);
         let (summary, report) = tokio::join!(client, server);
         assert_eq!(summary.unwrap().frames, 1);
         assert!(report.unwrap().paired);
@@ -373,7 +415,7 @@ mod tests {
         let (a, b) = tokio::io::duplex(4096);
         let client = run_client(&client_cfg, a);
         let confirm = |_code: &str| panic!("must not prompt for a known tablet");
-        let server = serve_once(b, &host_priv, &mut known, &cfg, &confirm);
+        let server = serve_once(b, &host_priv, &known, &cfg, &confirm);
         let (summary, report) = tokio::join!(client, server);
         let report = report.unwrap();
         assert!(!report.paired, "a known tablet must not pair again");

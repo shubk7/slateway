@@ -50,7 +50,13 @@ impl Default for LoopbackTransport {
 impl Transport for LoopbackTransport {
     async fn prepare(&mut self) -> Result<Option<SocketAddr>, TransportError> {
         // Loopback only, never all interfaces (docs/PROTOCOL.md,
-        // "Transports").
+        // "Transports"). Idempotent: the daemon re-prepares between
+        // sessions (adb reverse re-registration, cable replug) while
+        // the listener stays bound, so a tablet reconnecting during
+        // pairing never dials a dead port.
+        if let Some(listener) = &self.listener {
+            return Ok(Some(listener.local_addr()?));
+        }
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, self.port)).await?;
         let addr = listener.local_addr()?;
         self.listener = Some(listener);
@@ -58,7 +64,9 @@ impl Transport for LoopbackTransport {
     }
 
     async fn stream(&mut self) -> Result<BoxStream, TransportError> {
-        let listener = self.listener.take().ok_or(TransportError::NotReady)?;
+        // The listener stays with the transport (not taken): one
+        // accept per call, accepts continue while a session runs.
+        let listener = self.listener.as_ref().ok_or(TransportError::NotReady)?;
         let (stream, _peer) = listener.accept().await?;
         // Latency rule 5: frames are sent immediately, on both ends of
         // the link. Without this the daemon's replies wait on Nagle
@@ -110,14 +118,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn second_stream_fails() {
+    async fn accepts_two_connections_and_survives_reprepare() {
+        // The daemon re-prepares between sessions and accepts the next
+        // tablet while a pairing prompt is open: the listener must
+        // stay bound across accepts (the retry EOF regression).
         let mut transport = LoopbackTransport::new();
         let addr = transport.prepare().await.unwrap().unwrap();
-        let _tablet = TcpStream::connect(addr).await.unwrap();
-        let _host = transport.stream().await.unwrap();
-        assert!(matches!(
-            transport.stream().await,
-            Err(TransportError::NotReady)
-        ));
+        let _tablet1 = TcpStream::connect(addr).await.unwrap();
+        let _host1 = transport.stream().await.unwrap();
+
+        let addr2 = transport.prepare().await.unwrap().unwrap();
+        assert_eq!(addr, addr2, "re-prepare reuses the bound listener");
+        let _tablet2 = TcpStream::connect(addr2).await.unwrap();
+        let _host2 = transport.stream().await.unwrap();
     }
 }

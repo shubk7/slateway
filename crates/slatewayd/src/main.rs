@@ -8,6 +8,7 @@ pub mod session;
 
 use slateway_core::keys::{KnownTablets, config_dir, load_or_create_host_key};
 use slateway_platform::{AdbReverseTransport, DEFAULT_PORT, LoopbackTransport, Transport};
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() {
@@ -71,8 +72,7 @@ async fn run() -> Result<(), String> {
         None => config_dir().map_err(|err| err.to_string())?,
     };
     let host_key = load_or_create_host_key(&dir).map_err(|err| err.to_string())?;
-    let mut known =
-        KnownTablets::load(&dir.join("known-tablets")).map_err(|err| err.to_string())?;
+    let known = KnownTablets::load(&dir.join("known-tablets")).map_err(|err| err.to_string())?;
     println!(
         "slatewayd: host key loaded from {}; transport {:?} on port {}, echo {}, pairing {}",
         dir.display(),
@@ -87,84 +87,92 @@ async fn run() -> Result<(), String> {
         tick: std::time::Duration::from_secs(1),
     };
 
+    // One persistent transport: the listener stays bound across
+    // sessions (a tablet reconnecting while a pairing prompt is open
+    // must not dial a dead port) and adb reverse is re-registered per
+    // iteration because the tunnel drops with the device.
+    let mut transport: Box<dyn Transport> = match args.transport {
+        TransportChoice::Loopback => Box::new(LoopbackTransport::with_port(args.port)),
+        TransportChoice::Adb => Box::new(AdbReverseTransport::with_port(args.port)),
+    };
+    let known: session::SharedTablets = Arc::new(tokio::sync::Mutex::new(known));
+
     loop {
-        // One transport per connection: the loopback transport hands
-        // its listener over on accept, and adb reverse is re-registered
-        // per connection (the tunnel drops with the device). Setup
-        // failures (cable pulled, adb still catching up) are logged and
-        // retried, never fatal.
         println!(
             "waiting for the tablet ({:?} transport, port {})…",
             args.transport, args.port
         );
-        let mut transport: Box<dyn Transport> = match args.transport {
-            TransportChoice::Loopback => Box::new(LoopbackTransport::with_port(args.port)),
-            TransportChoice::Adb => Box::new(AdbReverseTransport::with_port(args.port)),
-        };
-        let stream = match setup_transport(&mut *transport).await {
-            Ok(stream) => stream,
+        match transport.prepare().await {
+            Ok(Some(addr)) => println!("listening on {addr}"),
+            Ok(None) => {}
             Err(err) => {
                 eprintln!("transport setup failed: {err}; retrying in 2 s");
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 continue;
             }
-        };
-        let auto_pair = args.auto_pair;
-        let confirm = move |code: &str| {
-            if auto_pair {
-                println!("pairing request: code {code} - auto-paired (--auto-pair)");
-                return true;
-            }
-            // Stray keystrokes re-prompt instead of killing the
-            // session; the tablet may already be showing its side of
-            // the code. Three tries, then the pairing is refused.
-            for attempt in 1..=3 {
-                println!(
-                    "pairing request: code {code} - confirm on the tablet, then enter y here ({attempt}/3)"
-                );
-                let mut line = String::new();
-                match std::io::stdin().read_line(&mut line) {
-                    Ok(0) => return false, // stdin closed
-                    Ok(_) => match line.trim().to_ascii_lowercase().as_str() {
-                        "y" | "yes" => return true,
-                        "n" | "no" => return false,
-                        _ => println!("enter y (confirm) or n (refuse)"),
-                    },
-                    Err(_) => return false,
-                }
-            }
-            false
-        };
-        match session::serve_once(stream, &host_key.private, &mut known, &cfg, &confirm).await {
-            Ok(report) => println!(
-                "session with '{}' ended: paired {}, echoed {} frames, \
-                 frames in {} / out {}, bytes in {} / out {}, \
-                 clock rtt {} us, offset {} us, tablet stats {:?}",
-                report.device_name,
-                report.paired,
-                report.echoed,
-                report.stats.frames_in,
-                report.stats.frames_out,
-                report.stats.bytes_in,
-                report.stats.bytes_out,
-                report.clock.estimate().map(|s| s.rtt_us).unwrap_or(-1),
-                report.clock.estimate().map(|s| s.offset_us).unwrap_or(0),
-                report.stats.tablet,
-            ),
-            Err(err) => eprintln!("session failed: {err}"),
         }
-        println!("tablet disconnected; waiting…");
+        let stream = match transport.stream().await {
+            Ok(stream) => stream,
+            Err(err) => {
+                eprintln!("accept failed: {err}; retrying in 2 s");
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                continue;
+            }
+        };
+        eprintln!("session: tablet connected");
+        // The session runs as its own task: the loop returns to accept
+        // immediately, so a pairing prompt never freezes the daemon.
+        let known = Arc::clone(&known);
+        let cfg = cfg.clone();
+        let host_private = host_key.private;
+        let auto_pair = args.auto_pair;
+        tokio::spawn(async move {
+            let confirm = move |code: &str| {
+                if auto_pair {
+                    println!("pairing request: code {code} - auto-paired (--auto-pair)");
+                    return true;
+                }
+                // Stray keystrokes re-prompt instead of killing the
+                // session; the tablet may already be showing its side
+                // of the code. Three tries, then the pairing is
+                // refused.
+                for attempt in 1..=3 {
+                    println!(
+                        "pairing request: code {code} - confirm on the tablet, then enter y here ({attempt}/3)"
+                    );
+                    let mut line = String::new();
+                    match std::io::stdin().read_line(&mut line) {
+                        Ok(0) => return false, // stdin closed
+                        Ok(_) => match line.trim().to_ascii_lowercase().as_str() {
+                            "y" | "yes" => return true,
+                            "n" | "no" => return false,
+                            _ => println!("enter y (confirm) or n (refuse)"),
+                        },
+                        Err(_) => return false,
+                    }
+                }
+                false
+            };
+            match session::serve_once(stream, &host_private, &known, &cfg, &confirm).await {
+                Ok(report) => println!(
+                    "session with '{}' ended: paired {}, echoed {} frames, \
+                     frames in {} / out {}, bytes in {} / out {}, \
+                     clock rtt {} us, offset {} us, tablet stats {:?}",
+                    report.device_name,
+                    report.paired,
+                    report.echoed,
+                    report.stats.frames_in,
+                    report.stats.frames_out,
+                    report.stats.bytes_in,
+                    report.stats.bytes_out,
+                    report.clock.estimate().map(|s| s.rtt_us).unwrap_or(-1),
+                    report.clock.estimate().map(|s| s.offset_us).unwrap_or(0),
+                    report.stats.tablet,
+                ),
+                Err(err) => eprintln!("session failed: {err}"),
+            }
+            eprintln!("session: tablet disconnected; waiting for the next connection");
+        });
         // Reconnect loop: the tablet may return without a new process.
     }
-}
-
-/// Prepares the transport and waits for the tablet's connection.
-async fn setup_transport(
-    transport: &mut dyn Transport,
-) -> Result<Box<dyn slateway_platform::transport::AsyncReadWrite>, String> {
-    let addr = transport.prepare().await.map_err(|err| err.to_string())?;
-    if let Some(addr) = addr {
-        println!("listening on {addr}");
-    }
-    transport.stream().await.map_err(|err| err.to_string())
 }

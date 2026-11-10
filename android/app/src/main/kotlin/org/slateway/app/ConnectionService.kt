@@ -9,6 +9,7 @@ import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.IBinder
+import android.util.Log
 import slateway.control.v0.Close
 import slateway.control.v0.CloseReason
 import slateway.control.v0.HelloAck
@@ -65,6 +66,10 @@ class ConnectionService : Service() {
     }
 
     private fun runSession(port: Int) {
+        val tag = "slateway"
+        // The step the session thread is in; shown on disconnect so a
+        // failure says WHERE it happened, not just the exception class.
+        var stage = "starting"
         update("connecting to host…")
         if (!NativeNoise.available) {
             update("native Noise library missing (build needs cargo-ndk, see docs/DEVELOPMENT.md)")
@@ -74,12 +79,15 @@ class ConnectionService : Service() {
         try {
             Socket().use { s ->
                 synchronized(this) { socket = s }
+                stage = "connecting to host"
                 s.connect(InetSocketAddress("127.0.0.1", port), CONNECT_TIMEOUT_MS)
                 s.tcpNoDelay = true
                 s.soTimeout = HANDSHAKE_TIMEOUT_MS
                 val input = DataInputStream(BufferedInputStream(s.getInputStream()))
                 val output = s.getOutputStream()
+                Log.i(tag, "socket connected to host on port $port")
 
+                stage = "noise handshake"
                 update("handshaking")
                 val privateKey = TabletKeys.loadOrCreatePrivateKey(this)
                 val deviceName = android.os.Build.MODEL ?: "tablet"
@@ -88,11 +96,15 @@ class ConnectionService : Service() {
                     // <- e, ee, s, es, -> s, se. Message sizes are
                     // never assumed; records are length-driven.
                     writeRecord(output, noise.writeMessage(ByteArray(0)))
+                    Log.i(tag, "noise: initiator hello sent")
                     val record = ByteArray(Protocol.MAX_RECORD)
-                    var len = readRecord(input, record)
-                    noise.readMessage(record.copyOf(len))
+                    val len1 = readRecord(input, record)
+                    Log.i(tag, "noise: host reply read ($len1 bytes)")
+                    noise.readMessage(record.copyOf(len1))
                     writeRecord(output, noise.writeMessage(deviceName.toByteArray()))
+                    Log.i(tag, "noise: tablet identity sent ('$deviceName')")
 
+                    stage = "checking trusted hosts"
                     val hostKey = noise.remoteStatic()
                         ?: throw ProtocolException("host static key unknown after XX")
                     val code = pairingCode(noise.handshakeHash())
@@ -101,16 +113,21 @@ class ConnectionService : Service() {
                         // An unknown host restarts pairing
                         // (docs/SECURITY.md): the code match on both
                         // screens is the anti-MITM check.
+                        stage = "pairing"
                         update("pairing: confirm code $code on host and tablet")
+                        Log.i(tag, "pairing: prompting for code $code")
                         requestPairing(code)
+                        Log.i(tag, "pairing: confirmed on the tablet")
                     }
                     // The pairing wait is human-paced; the protocol
                     // exchange resumes without a read deadline. A cable
                     // pull still surfaces as an EOF.
                     s.soTimeout = 0
+                    stage = "switching to encrypted transport"
                     noise.intoTransport()
 
                     // Encrypted control frames from here on.
+                    stage = "hello exchange"
                     val channel = SecureChannel(noise)
                     val hello = buildHello(
                         appVersion = packageManager.getPackageInfo(packageName, 0).versionName ?: "0.1.0",
@@ -123,6 +140,7 @@ class ConnectionService : Service() {
                         FrameHeader(Protocol.CHANNEL_CONTROL, 0, Protocol.HELLO_TYPE, helloBytes.size, 0),
                         helloBytes,
                     )
+                    Log.i(tag, "hello: sent (app '${hello.appVersion}')")
                     val (ackFrame, ackPayload) = channel.readFrame(input)
                     if (ackFrame.channel != Protocol.CHANNEL_CONTROL || ackFrame.type != Protocol.HELLO_ACK_TYPE) {
                         throw ProtocolException(
@@ -150,12 +168,15 @@ class ConnectionService : Service() {
                         TabletKeys.trustHost(this, hostKey)
                     }
 
+                    stage = "session"
                     update(
                         "handshake complete" + ack.appVersion.takeIf { it.isNotEmpty() }?.let { " with $it" }.orEmpty()
                     )
+                    Log.i(tag, "handshake complete with host app '${ack.appVersion}'")
 
                     // The M0 shell answers clock-sync pings and holds
                     // the session open; the daemon drives the echo.
+                    var pongs = 0
                     while (true) {
                         val (frame, payload) = channel.readFrame(input)
                         if (frame.channel == Protocol.CHANNEL_CONTROL && frame.type == Protocol.PING_TYPE) {
@@ -170,6 +191,8 @@ class ConnectionService : Service() {
                                 FrameHeader(Protocol.CHANNEL_CONTROL, 0, Protocol.PONG_TYPE, pong.size, 0),
                                 pong,
                             )
+                            pongs++
+                            if (pongs == 1) Log.i(tag, "session: first clock ping answered")
                         }
                         // Other frames are discarded for now.
                     }
@@ -177,8 +200,10 @@ class ConnectionService : Service() {
             }
         } catch (e: Exception) {
             // Never log frame or input contents (docs/SECURITY.md): the
-            // exception class and our own short messages only.
-            update("disconnected: ${e.javaClass.simpleName}")
+            // exception class, its message and our own short messages
+            // only.
+            Log.e(tag, "session failed during stage: $stage", e)
+            update("disconnected: ${e.javaClass.simpleName} ($stage)")
         } finally {
             synchronized(this) { socket = null }
             running = false

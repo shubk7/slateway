@@ -5,6 +5,7 @@ package org.slateway.app
 import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
+import android.util.Log
 import java.io.File
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
@@ -19,6 +20,7 @@ import javax.crypto.spec.GCMParameterSpec
  * public data). Not unit-testable on the JVM; verified on device.
  */
 object TabletKeys {
+    private const val TAG = "slateway"
     private const val WRAP_ALIAS = "slateway-noise-wrap"
     private const val KEY_FILE = "noise.key"
     private const val HOST_FILE = "known-hosts"
@@ -31,8 +33,10 @@ object TabletKeys {
     fun loadOrCreatePrivateKey(context: Context): ByteArray {
         val file = File(context.filesDir, KEY_FILE)
         if (file.exists()) {
+            Log.i(TAG, "keys: noise key loaded from storage")
             return unwrap(file.readBytes())
         }
+        Log.i(TAG, "keys: first run, generating noise key")
         val keypair = NativeNoise.generateKeypair()
         require(keypair.size == 2 * KEY_BYTES) {
             "keypair generator returned ${keypair.size} bytes"
@@ -44,12 +48,27 @@ object TabletKeys {
 
     /** Whether this host's static public key is in the trusted set.
      * Unknown hosts simply restart pairing; there is no single-host
-     * pin, so a tablet moves between hosts freely. */
+     * pin, so a tablet moves between hosts freely. A missing or
+     * unreadable file means "no trusted hosts", never an error: the
+     * first run after an install must reach pairing, not crash. */
     fun isTrustedHost(context: Context, publicKey: ByteArray): Boolean {
         require(publicKey.size == KEY_BYTES) { "host key must be $KEY_BYTES bytes" }
-        return hostKeysFile(context).readLines().any { line ->
+        val file = hostKeysFile(context)
+        if (!file.exists()) {
+            Log.i(TAG, "keys: no trusted hosts stored yet (fresh install or forgotten)")
+            return false
+        }
+        val lines = try {
+            file.readLines()
+        } catch (e: Exception) {
+            Log.e(TAG, "keys: could not read known-hosts; treating as untrusted", e)
+            return false
+        }
+        val trusted = lines.any { line ->
             hexToBytes(line.trim())?.contentEquals(publicKey) == true
         }
+        Log.i(TAG, "keys: host is ${if (trusted) "trusted" else "unknown"} among ${lines.size} known")
+        return trusted
     }
 
     /** Adds a host's public key to the trusted set once pairing is
@@ -58,6 +77,7 @@ object TabletKeys {
         require(publicKey.size == KEY_BYTES) { "host key must be $KEY_BYTES bytes" }
         if (isTrustedHost(context, publicKey)) return
         hostKeysFile(context).appendText(hexEncode(publicKey) + "\n")
+        Log.i(TAG, "keys: host trusted and stored")
     }
 
     /** Forgets every trusted host; the next connection pairs again. */
