@@ -16,8 +16,8 @@ use slateway_core::stats::SessionStats;
 use slateway_core::{ClockSync, KEY_LEN, MAX_PLAINTEXT};
 use slateway_proto::Channel;
 use slateway_proto::control::{
-    CLOSE_TYPE, Close, CloseReason, HELLO_ACK_TYPE, HELLO_TYPE, Hello, HelloAck, PING_TYPE,
-    PONG_TYPE, Ping, Pong, STATS_TYPE, Stats,
+    CLOSE_TYPE, Close, CloseReason, HELLO_ACK_TYPE, HELLO_TYPE, Hello, HelloAck, PAIR_NEEDED_TYPE,
+    PING_TYPE, PONG_TYPE, PairNeeded, Ping, Pong, STATS_TYPE, Stats,
 };
 use slateway_proto::frame::FrameHeader;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -109,51 +109,96 @@ where
 
     let mut report = SessionReport::default();
     let mut session = done.session;
-    // Lock only around the registry access, never across the (blocking,
-    // human-paced) confirm prompt.
+
+    // Pairing gate (docs/PROTOCOL.md, "Handshake and versioning";
+    // docs/SECURITY.md, "Pairing"): the tablet's first control frame
+    // says whether IT needs the code confirmed, the registry says
+    // whether the daemon does. The prompt runs when either side needs
+    // pairing, so the code is confirmed on both screens whenever
+    // either one requires it.
     let known_name = known
         .lock()
         .await
         .find(&remote_static)
         .map(|tablet| tablet.name.clone());
-    match known_name {
-        Some(name) => {
-            eprintln!("session: tablet is known ('{name}')");
-            report.device_name = name;
-        }
-        None => {
-            let code = slateway_core::pairing_code(&done.handshake_hash);
-            eprintln!("session: unknown tablet, pairing required");
-            if !confirm(&code) {
-                eprintln!("session: pairing refused");
-                return Err(SessionFailure::Pairing(
-                    "the operator did not confirm the code",
-                ));
-            }
-            known
-                .lock()
-                .await
-                .insert(KnownTablet {
-                    public: remote_static,
-                    name: device_name.clone(),
-                })
-                .map_err(|_err| SessionFailure::Pairing("could not store the paired tablet"))?;
-            eprintln!("session: tablet '{device_name}' paired and stored");
-            report.paired = true;
-            report.device_name = device_name.clone();
-        }
-    }
-    if report.device_name.is_empty() {
-        report.device_name = device_name;
+    let daemon_wants_pairing = known_name.is_none();
+    match &known_name {
+        Some(name) => eprintln!("session: tablet is known ('{name}')"),
+        None => eprintln!("session: unknown tablet, pairing required"),
     }
 
-    // Control frames: Hello, answered by HelloAck (docs/PROTOCOL.md,
-    // "Handshake and versioning").
     let mut scratch = vec![0u8; MAX_PLAINTEXT];
+
+    // The tablet's first control frame: PairNeeded or Hello.
     let (header, len) = session.read_frame(&mut scratch).await?;
-    if header.channel != Channel::Control || header.message_type != HELLO_TYPE {
-        return Err(SessionError::Protocol("expected a Hello frame").into());
+    if header.channel != Channel::Control {
+        return Err(SessionError::Protocol("expected a control frame").into());
     }
+    let tablet_wants_pairing = match header.message_type {
+        PAIR_NEEDED_TYPE => {
+            eprintln!("session: tablet requests pairing confirmation");
+            true
+        }
+        HELLO_TYPE => false,
+        _ => return Err(SessionError::Protocol("expected Hello or PairNeeded").into()),
+    };
+
+    // One operator prompt, when either side needs pairing. The prompt
+    // blocks this task only; the accept loop stays live.
+    if tablet_wants_pairing || daemon_wants_pairing {
+        let code = slateway_core::pairing_code(&done.handshake_hash);
+        if !confirm(&code) {
+            eprintln!("session: pairing refused");
+            // Best effort: the tablet may still be waiting for an
+            // answer; give it the orderly shutdown.
+            let _ = send_control(
+                &mut session,
+                CLOSE_TYPE,
+                &Close {
+                    reason: CloseReason::Error as i32,
+                }
+                .encode_to_vec(),
+            )
+            .await;
+            return Err(SessionFailure::Pairing(
+                "the operator did not confirm the code",
+            ));
+        }
+        eprintln!("session: pairing confirmed by the operator");
+    }
+
+    // Settle the Hello: after the tablet's own prompt it sends Hello;
+    // if it sent Hello directly but the daemon needs pairing, it
+    // resends Hello after the daemon's PairNeeded.
+    let (_header, len) = if tablet_wants_pairing {
+        let (header, len) = session.read_frame(&mut scratch).await?;
+        if header.channel != Channel::Control || header.message_type != HELLO_TYPE {
+            return Err(SessionError::Protocol(
+                "expected Hello after the tablet's pairing confirmation",
+            )
+            .into());
+        }
+        (header, len)
+    } else if daemon_wants_pairing {
+        send_control(
+            &mut session,
+            PAIR_NEEDED_TYPE,
+            &PairNeeded {}.encode_to_vec(),
+        )
+        .await?;
+        eprintln!("session: asked the tablet to confirm the pairing code");
+        let (header, len) = session.read_frame(&mut scratch).await?;
+        if header.channel != Channel::Control || header.message_type != HELLO_TYPE {
+            return Err(SessionError::Protocol(
+                "expected Hello re-sent after the tablet's pairing confirmation",
+            )
+            .into());
+        }
+        (header, len)
+    } else {
+        (header, len)
+    };
+
     let hello = Hello::decode(&scratch[..len])?;
     if hello.protocol_major != slateway_proto::control::PROTOCOL_MAJOR {
         send_control(
@@ -178,6 +223,22 @@ where
         capabilities: 0,
     };
     send_control(&mut session, HELLO_ACK_TYPE, &ack.encode_to_vec()).await?;
+
+    // The exchange completed with the operator's confirmation: store
+    // the tablet so later sessions pair silently.
+    if daemon_wants_pairing {
+        known
+            .lock()
+            .await
+            .insert(KnownTablet {
+                public: remote_static,
+                name: device_name.clone(),
+            })
+            .map_err(|_err| SessionFailure::Pairing("could not store the paired tablet"))?;
+        eprintln!("session: tablet '{device_name}' paired and stored");
+        report.paired = true;
+    }
+    report.device_name = known_name.unwrap_or_else(|| device_name.clone());
 
     // Session loop: frames from the tablet, and one Ping per tick. A
     // deadline-bounded read keeps the channel free for the tick's
@@ -375,6 +436,107 @@ mod tests {
         assert!(
             report.stats.frames_in >= 22,
             "echo frames, Hello, Stats and Pongs must arrive"
+        );
+    }
+
+    /// A tablet that trusts the host but is unknown to the daemon
+    /// sends Hello directly; the daemon answers PairNeeded and the
+    /// tablet re-sends Hello after its (simulated) prompt. This is
+    /// the echo rehearsal's path: the daemon prompts once, stores the
+    /// tablet, and completes the exchange.
+    #[tokio::test]
+    async fn unknown_tablet_sending_hello_is_asked_to_pair() {
+        let dir = TempDir::new().unwrap();
+        let known: SharedTablets = Arc::new(Mutex::new(
+            KnownTablets::load(&dir.path().join("known-tablets")).unwrap(),
+        ));
+        let (host_priv, _) = generate_keypair().unwrap();
+        let host_priv: [u8; KEY_LEN] = host_priv.as_slice().try_into().unwrap();
+
+        let (a, b) = tokio::io::duplex(4096);
+        let server = tokio::spawn(async move {
+            let cfg = SessionConfig {
+                echo: true,
+                tick: Duration::from_millis(20),
+            };
+            let confirm = |_code: &str| true;
+            serve_once(a, &host_priv, &known, &cfg, &confirm).await
+        });
+
+        let client_cfg = ClientConfig {
+            frames: 1,
+            size: 64,
+            interval: Duration::from_millis(1),
+            device_name: "hello-first".into(),
+            ..Default::default()
+        };
+        let client = run_client(&client_cfg, b);
+        let (client_res, server_res) = tokio::join!(client, server);
+        client_res.unwrap_or_else(|err| panic!("client failed: {err}"));
+        let report = server_res
+            .unwrap_or_else(|err| panic!("server task failed: {err:?}"))
+            .unwrap_or_else(|err| panic!("server failed: {err}"));
+        assert!(report.paired, "the unknown tablet is stored after pairing");
+        assert_eq!(report.device_name, "hello-first");
+    }
+
+    /// A KNOWN tablet that lost its host trust sends PairNeeded first:
+    /// the daemon must prompt anyway (the code is confirmed on both
+    /// screens), not store a second entry, and still complete.
+    #[tokio::test]
+    async fn known_tablet_requesting_pairing_gets_a_prompt() {
+        let dir = TempDir::new().unwrap();
+        let known: SharedTablets = Arc::new(Mutex::new(
+            KnownTablets::load(&dir.path().join("known-tablets")).unwrap(),
+        ));
+        let (host_priv, _) = generate_keypair().unwrap();
+        let host_priv: [u8; KEY_LEN] = host_priv.as_slice().try_into().unwrap();
+        let (tablet_priv, _) = generate_keypair().unwrap();
+
+        let cfg = SessionConfig {
+            echo: true,
+            tick: Duration::from_millis(20),
+        };
+        let client_cfg = ClientConfig {
+            frames: 1,
+            size: 64,
+            interval: Duration::from_millis(1),
+            device_name: "S6".into(),
+            private_key: Some(tablet_priv.as_slice().try_into().unwrap()),
+            request_pairing: true,
+            ..Default::default()
+        };
+
+        // First run pairs and stores (the daemon's prompt auto-confirms).
+        let (a, b) = tokio::io::duplex(4096);
+        let client = run_client(&client_cfg, b);
+        let confirm = |_code: &str| true;
+        let server = serve_once(a, &host_priv, &known, &cfg, &confirm);
+        let (summary, report) = tokio::join!(client, server);
+        assert_eq!(summary.unwrap().frames, 1);
+        assert!(report.unwrap().paired);
+
+        // Second run: same tablet key (still known to the daemon), but
+        // the tablet lost its host trust and asks for pairing. The
+        // daemon prompts (counted), does NOT re-store, and completes.
+        let (a, b) = tokio::io::duplex(4096);
+        let client = run_client(&client_cfg, b);
+        let prompted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let prompt_counter = Arc::clone(&prompted);
+        let confirm = move |_code: &str| {
+            prompt_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            true
+        };
+        let server = serve_once(a, &host_priv, &known, &cfg, &confirm);
+        let (summary, report) = tokio::join!(client, server);
+        assert_eq!(summary.unwrap().frames, 1);
+        let report = report.unwrap();
+        assert!(!report.paired, "a known tablet must not be stored twice");
+        assert_eq!(report.device_name, "S6");
+        assert_eq!(
+            prompted.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the daemon must prompt when the tablet requests pairing"
         );
     }
 

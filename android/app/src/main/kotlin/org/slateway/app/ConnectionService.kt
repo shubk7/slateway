@@ -109,16 +109,6 @@ class ConnectionService : Service() {
                         ?: throw ProtocolException("host static key unknown after XX")
                     val code = pairingCode(noise.handshakeHash())
                     val trusted = TabletKeys.isTrustedHost(this, hostKey)
-                    if (!trusted) {
-                        // An unknown host restarts pairing
-                        // (docs/SECURITY.md): the code match on both
-                        // screens is the anti-MITM check.
-                        stage = "pairing"
-                        update("pairing: confirm code $code on host and tablet")
-                        Log.i(tag, "pairing: prompting for code $code")
-                        requestPairing(code)
-                        Log.i(tag, "pairing: confirmed on the tablet")
-                    }
                     // The pairing wait is human-paced; the protocol
                     // exchange resumes without a read deadline. A cable
                     // pull still surfaces as an EOF.
@@ -126,28 +116,69 @@ class ConnectionService : Service() {
                     stage = "switching to encrypted transport"
                     noise.intoTransport()
 
-                    // Encrypted control frames from here on.
-                    stage = "hello exchange"
+                    // Pairing dance (docs/PROTOCOL.md, "Handshake and
+                    // versioning"): a side that needs the code confirmed
+                    // announces PairNeeded first, so the code is visible
+                    // and confirmed on BOTH screens whenever either side
+                    // requires pairing.
+                    stage = "pairing exchange"
                     val channel = SecureChannel(noise)
+                    if (!trusted) {
+                        // This tablet does not know the host: announce it
+                        // so the host shows its prompt too, then confirm
+                        // here.
+                        channel.writeFrame(
+                            output,
+                            FrameHeader(Protocol.CHANNEL_CONTROL, 0, Protocol.PAIR_NEEDED_TYPE, 0, 0),
+                            ByteArray(0),
+                        )
+                        Log.i(tag, "pairing: tablet needs pairing, PairNeeded sent")
+                        update("pairing: confirm code $code on host and tablet")
+                        Log.i(tag, "pairing: prompting for code $code")
+                        requestPairing(code)
+                        Log.i(tag, "pairing: confirmed on the tablet")
+                    }
+
+                    stage = "hello exchange"
                     val hello = buildHello(
                         appVersion = packageManager.getPackageInfo(packageName, 0).versionName ?: "0.1.0",
                         deviceModel = deviceName,
                         androidApi = android.os.Build.VERSION.SDK_INT,
                     )
                     val helloBytes = hello.toByteArray()
-                    channel.writeFrame(
-                        output,
-                        FrameHeader(Protocol.CHANNEL_CONTROL, 0, Protocol.HELLO_TYPE, helloBytes.size, 0),
-                        helloBytes,
-                    )
-                    Log.i(tag, "hello: sent (app '${hello.appVersion}')")
-                    val (ackFrame, ackPayload) = channel.readFrame(input)
-                    if (ackFrame.channel != Protocol.CHANNEL_CONTROL || ackFrame.type != Protocol.HELLO_ACK_TYPE) {
-                        throw ProtocolException(
-                            "expected HelloAck, got channel ${ackFrame.channel} type ${ackFrame.type}"
+                    var ack: HelloAck? = null
+                    while (ack == null) {
+                        channel.writeFrame(
+                            output,
+                            FrameHeader(Protocol.CHANNEL_CONTROL, 0, Protocol.HELLO_TYPE, helloBytes.size, 0),
+                            helloBytes,
                         )
+                        Log.i(tag, "hello: sent (app '${hello.appVersion}')")
+                        val (frame, payload) = channel.readFrame(input)
+                        if (frame.channel != Protocol.CHANNEL_CONTROL) {
+                            throw ProtocolException(
+                                "expected a control frame, got channel ${frame.channel}"
+                            )
+                        }
+                        when (frame.type) {
+                            Protocol.HELLO_ACK_TYPE -> ack = HelloAck.parseFrom(payload)
+                            Protocol.PAIR_NEEDED_TYPE -> {
+                                // The host does not know this tablet: it
+                                // asked for the code confirmation even
+                                // though the tablet trusts it.
+                                Log.i(tag, "pairing: host requests pairing confirmation")
+                                update("pairing: confirm code $code on host and tablet")
+                                requestPairing(code)
+                                Log.i(tag, "pairing: confirmed on the tablet")
+                            }
+                            Protocol.CLOSE_TYPE -> throw ProtocolException(
+                                "host closed the session during pairing"
+                            )
+                            else -> throw ProtocolException(
+                                "expected HelloAck or PairNeeded, got type ${frame.type}"
+                            )
+                        }
                     }
-                    val ack = HelloAck.parseFrom(ackPayload)
                     if (ack.protocolMajor != Protocol.PROTOCOL_MAJOR) {
                         val close = Close.newBuilder()
                             .setReason(CloseReason.MAJOR_MISMATCH)

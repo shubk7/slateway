@@ -18,8 +18,8 @@ Noise_XX over the byte stream, with static keys per device. Always on, including
 ## Pairing
 
 1. First connection runs the handshake with unknown keys.
-2. Both sides derive a 6-digit code from the handshake hash. The user confirms it matches on the host prompt and on the tablet.
-3. The host stores the tablet's public key and name; a known tablet presenting a changed key is a hard failure. The tablet stores the keys of the hosts it has paired with - an unknown host restarts pairing - with its own private key wrapped by the Android Keystore.
+2. Both sides derive a 6-digit code from the handshake hash. A side that needs the pairing confirmed sends `PairNeeded` as its first control frame (`PROTOCOL.md`, "Handshake and versioning"), and the receiver then runs its own prompt - so the code is always visible and confirmed on BOTH screens whenever either side requires pairing, including when only one side lost its state (tablet reinstalled, host registry wiped).
+3. The host stores the tablet's public key and name; a known tablet presenting a changed key is a hard failure. The tablet stores the keys of the hosts it has paired with - an unknown host restarts pairing - with its own private key wrapped by the Android Keystore. Neither side stores a key without its own confirmed prompt.
 4. Later connections require the pinned key.
 
 ## Consent

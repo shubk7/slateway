@@ -62,12 +62,23 @@ Parsers must reject oversized lengths and unknown channels, and never allocate b
 
 ## Handshake and versioning
 
-1. After the encrypted channel is up: `Hello` (protocol major.minor, app version, device model, Android API, supported codecs and decode limits, screen size and refresh rate, capability bitmask), answered by `HelloAck`.
-2. Pairing or key verification (`SECURITY.md`).
+1. After the encrypted channel is up, a side that needs the pairing
+   code confirmed sends `PairNeeded` (type 7, empty) as its FIRST
+   control frame; the receiver then runs its own code prompt, so the
+   code - derived from the handshake hash on both sides, never on the
+   wire - is visible and confirmed on both screens whenever either
+   side requires pairing (`SECURITY.md`, "Pairing"). Cases: the
+   tablet does not trust the host (tablet sends `PairNeeded`); the
+   host does not know the tablet (host answers the tablet's `Hello`
+   with `PairNeeded`, and the tablet resends `Hello` after its
+   prompt); both at once (the host prompts on receiving
+   `PairNeeded`). Neither side stores a key without its own
+   confirmed prompt.
+2. After pairing is settled: `Hello` (protocol major.minor, app version, device model, Android API, supported codecs and decode limits, screen size and refresh rate, capability bitmask), answered by `HelloAck`.
 3. `Configure`: mode (mirror, extend, drawing-tablet), target display, resolution, fps, bitrate, codec, rotation.
 4. `StreamStart`. A resolution or rotation change sends a new `Configure` followed by an IDR frame.
 
-Major mismatch is refused with an error. Minor changes are additive only. Protobuf tags are never reused. Unknown control messages are ignored if marked optional, otherwise they are an error.
+Major mismatch is refused with an error. Minor changes are additive only (minor 1 adds `PairNeeded`). Protobuf tags are never reused. Unknown control messages are ignored if marked optional, otherwise they are an error.
 
 ## Control messages
 
@@ -126,7 +137,8 @@ field selects the message:
 | 4 | Ping | host to tablet |
 | 5 | Pong | tablet to host |
 | 6 | Stats | tablet to host |
-| 7+ | unassigned | |
+| 7 | PairNeeded | both |
+| 8+ | unassigned | |
 
 Type numbers are never reused. Unknown control types are an error in
 draft v0 (both sides run the same version). Capability bitmasks have all

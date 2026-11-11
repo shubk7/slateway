@@ -53,6 +53,16 @@ message Close {
   CloseReason reason = 1;
 }
 
+// Pairing-needed signal (frame type 7, either direction, empty
+// payload). Sent as a side's FIRST control frame when that side needs
+// the operator to confirm the pairing code (docs/PROTOCOL.md
+// "Handshake and versioning", docs/SECURITY.md "Pairing"): the
+// receiver then runs its own code prompt, so the code is visible and
+// confirmed on both screens whenever either side requires pairing.
+// The code itself is derived from the handshake hash on both sides
+// and never crosses the wire.
+message PairNeeded {}
+
 // Clock sync (frame types 4 and 5, docs/PROTOCOL.md "Clocks"): the
 // host sends Ping once per second; the tablet answers Pong. The host
 // stamps t3 itself on arrival, so only t0 to t2 cross the wire. All

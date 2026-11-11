@@ -9,8 +9,9 @@
 /// Protocol major version: draft v0 (`docs/PROTOCOL.md`).
 pub const PROTOCOL_MAJOR: u32 = 0;
 
-/// Protocol minor version; additive changes bump this.
-pub const PROTOCOL_MINOR: u32 = 0;
+/// Protocol minor version; additive changes bump this. Bumped to 1
+/// for the PairNeeded pairing signal (type 7).
+pub const PROTOCOL_MINOR: u32 = 1;
 
 /// Frame header `type` for [`Hello`].
 pub const HELLO_TYPE: u16 = 1;
@@ -29,6 +30,10 @@ pub const PONG_TYPE: u16 = 5;
 
 /// Frame header `type` for [`Stats`] (tablet to host).
 pub const STATS_TYPE: u16 = 6;
+
+/// Frame header `type` for [`PairNeeded`] (both directions, first
+/// control frame of a side that needs the pairing code confirmed).
+pub const PAIR_NEEDED_TYPE: u16 = 7;
 
 include!(concat!(env!("OUT_DIR"), "/slateway.control.v0.rs"));
 
@@ -99,6 +104,8 @@ mod tests {
         assert_eq!(PING_TYPE, 4);
         assert_eq!(PONG_TYPE, 5);
         assert_eq!(STATS_TYPE, 6);
+        assert_eq!(PAIR_NEEDED_TYPE, 7);
+        assert_eq!(PROTOCOL_MINOR, 1);
     }
 
     /// A Hello rides in a control frame: the whole frame round-trips

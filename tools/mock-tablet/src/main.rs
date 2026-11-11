@@ -46,6 +46,7 @@ async fn main() {
         interval: Duration::from_millis(args.interval_ms),
         device_name: args.name.clone(),
         private_key: None,
+        request_pairing: false,
     };
     if let Some(path) = &args.key_file {
         match load_or_create_key(path) {

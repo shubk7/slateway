@@ -14,9 +14,9 @@ import java.net.ProtocolException
  * same numbers; a change here is a protocol change.
  */
 object Protocol {
-    /** Draft v0 (docs/PROTOCOL.md title). */
+    /** Draft v0 (docs/PROTOCOL.md title). Minor 1 adds PairNeeded. */
     const val PROTOCOL_MAJOR: Int = 0
-    const val PROTOCOL_MINOR: Int = 0
+    const val PROTOCOL_MINOR: Int = 1
     const val DEFAULT_PORT: Int = 47820
     const val MAX_PAYLOAD_LEN: Int = 16 * 1024 * 1024
     const val HEADER_LEN: Int = 16
@@ -38,6 +38,11 @@ object Protocol {
     const val PING_TYPE: Int = 4
     const val PONG_TYPE: Int = 5
     const val STATS_TYPE: Int = 6
+
+    /** PairNeeded: either direction, first control frame of a side
+     * that needs the pairing code confirmed (docs/PROTOCOL.md,
+     * "Handshake and versioning"). */
+    const val PAIR_NEEDED_TYPE: Int = 7
 }
 
 /**

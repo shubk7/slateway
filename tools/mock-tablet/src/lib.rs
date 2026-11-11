@@ -18,8 +18,8 @@ use slateway_core::crypto::{
 use slateway_core::stats::{SessionStats, percentile};
 use slateway_proto::Channel;
 use slateway_proto::control::{
-    CLOSE_TYPE, Close, CloseReason, HELLO_ACK_TYPE, HELLO_TYPE, Hello, HelloAck, PING_TYPE,
-    PONG_TYPE, Ping, Pong, STATS_TYPE, Stats,
+    CLOSE_TYPE, Close, CloseReason, HELLO_ACK_TYPE, HELLO_TYPE, Hello, HelloAck, PAIR_NEEDED_TYPE,
+    PING_TYPE, PONG_TYPE, Ping, Pong, STATS_TYPE, Stats,
 };
 use slateway_proto::frame::FrameHeader;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -63,6 +63,9 @@ pub struct ClientConfig {
     pub device_name: String,
     /// Static private key; generated when none is given.
     pub private_key: Option<[u8; KEY_LEN]>,
+    /// Send PairNeeded as the first control frame (the tablet-driven
+    /// pairing case: this tablet does not trust the host yet).
+    pub request_pairing: bool,
 }
 
 impl Default for ClientConfig {
@@ -74,6 +77,7 @@ impl Default for ClientConfig {
             interval: Duration::from_millis(10),
             device_name: "mock-tablet".into(),
             private_key: None,
+            request_pairing: false,
         }
     }
 }
@@ -125,7 +129,10 @@ where
     summary.pairing_code = slateway_core::pairing_code(&done.handshake_hash);
     let mut session = done.session;
 
-    // Control frames: Hello, then HelloAck.
+    // Control frames: Hello, then HelloAck. When the host needs the
+    // pairing code confirmed it answers with PairNeeded; the mock
+    // simulates the confirmed tablet prompt by resending Hello
+    // (docs/PROTOCOL.md, "Handshake and versioning").
     let hello = Hello {
         protocol_major: slateway_proto::control::PROTOCOL_MAJOR,
         protocol_minor: slateway_proto::control::PROTOCOL_MINOR,
@@ -137,11 +144,26 @@ where
         screen: None,
         capabilities: 0,
     };
-    send_control(&mut session, HELLO_TYPE, &hello.encode_to_vec()).await?;
-    let (ack_header, ack_bytes) = read_control(&mut session).await?;
-    if ack_header.message_type != HELLO_ACK_TYPE {
-        return Err(ClientError::Protocol("expected a HelloAck frame"));
+    let hello_bytes = hello.encode_to_vec();
+    if cfg.request_pairing {
+        // Tablet-driven pairing: this tablet does not trust the host
+        // and asks for the code confirmation before its Hello.
+        send_control(&mut session, PAIR_NEEDED_TYPE, &[]).await?;
     }
+    send_control(&mut session, HELLO_TYPE, &hello_bytes).await?;
+    let (_, ack_bytes) = loop {
+        let (header, bytes) = read_control(&mut session).await?;
+        match header.message_type {
+            HELLO_ACK_TYPE => break (header, bytes),
+            PAIR_NEEDED_TYPE => send_control(&mut session, HELLO_TYPE, &hello_bytes).await?,
+            other => {
+                let _ = other;
+                return Err(ClientError::Protocol(
+                    "expected a HelloAck frame after the pairing exchange",
+                ));
+            }
+        }
+    };
     let ack = HelloAck::decode(ack_bytes.as_slice())?;
     summary.host_version = ack.app_version;
 
