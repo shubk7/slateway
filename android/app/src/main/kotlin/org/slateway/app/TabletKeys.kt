@@ -35,12 +35,21 @@ object TabletKeys {
     private const val KEY_BYTES = 32
 
     /** The static Noise private key, generated and wrapped on first
-     * run, unwrapped from the Keystore afterwards. */
+     * run, unwrapped from the Keystore afterwards. An unreadable
+     * stored key (a torn write can never unwrap) is regenerated rather
+     * than failing every future session; the identity change means
+     * hosts pair again (docs/SECURITY.md). */
     fun loadOrCreatePrivateKey(context: Context): ByteArray {
         val file = File(context.filesDir, KEY_FILE)
         if (file.exists()) {
-            Log.i(TAG, "keys: noise key loaded from storage")
-            return unwrap(file.readBytes())
+            try {
+                val private = unwrap(file.readBytes())
+                Log.i(TAG, "keys: noise key loaded from storage")
+                return private
+            } catch (e: Exception) {
+                Log.e(TAG, "keys: stored noise key unreadable; regenerating", e)
+                file.delete()
+            }
         }
         Log.i(TAG, "keys: first run, generating noise key")
         val keypair = NativeNoise.generateKeypair()
@@ -48,7 +57,14 @@ object TabletKeys {
             "keypair generator returned ${keypair.size} bytes"
         }
         val private = keypair.copyOfRange(0, KEY_BYTES)
-        file.writeBytes(wrap(private))
+        // Atomic replace: a crash mid-write must not leave a torn
+        // noise.key behind.
+        val tmp = File(context.filesDir, "$KEY_FILE.tmp")
+        tmp.writeBytes(wrap(private))
+        if (!tmp.renameTo(file)) {
+            tmp.delete()
+            throw IllegalStateException("could not store the wrapped noise key")
+        }
         return private
     }
 

@@ -75,6 +75,27 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Args, String> {
     })
 }
 
+/// Keeps the live-session count honest even if a session task panics:
+/// the count gates the adb reverse refresh, and a leaked count would
+/// disable the tunnel refresh for the life of the process.
+struct SessionGuard {
+    sessions: Arc<AtomicUsize>,
+}
+
+impl SessionGuard {
+    fn new(sessions: Arc<AtomicUsize>) -> Self {
+        sessions.fetch_add(1, Ordering::Relaxed);
+        SessionGuard { sessions }
+    }
+}
+
+impl Drop for SessionGuard {
+    fn drop(&mut self) {
+        self.sessions.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// Runs the daemon's reconnect loop.
 async fn run() -> Result<(), String> {
     let args = parse_args(std::env::args().skip(1))?;
 
@@ -84,6 +105,9 @@ async fn run() -> Result<(), String> {
     };
     let host_key = load_or_create_host_key(&dir).map_err(|err| err.to_string())?;
     let known = KnownTablets::load(&dir.join("known-tablets")).map_err(|err| err.to_string())?;
+    for (line, problem) in known.malformed() {
+        eprintln!("slatewayd: known-tablets line {line} skipped: {problem}");
+    }
     println!(
         "slatewayd: host key loaded from {}; transport {:?} on port {}, echo {}, pairing {}",
         dir.display(),
@@ -145,7 +169,6 @@ async fn run() -> Result<(), String> {
             Err(_elapsed) => continue,
         };
         eprintln!("session: tablet connected");
-        sessions.fetch_add(1, Ordering::Relaxed);
         // The session runs as its own task: the loop returns to accept
         // immediately, so a pairing prompt never freezes the daemon.
         let known = Arc::clone(&known);
@@ -154,6 +177,9 @@ async fn run() -> Result<(), String> {
         let auto_pair = args.auto_pair;
         let sessions = Arc::clone(&sessions);
         tokio::spawn(async move {
+            // Counts this session for the tunnel-refresh gate; the
+            // guard keeps the count honest even if the task panics.
+            let _session = SessionGuard::new(sessions);
             let confirm = move |code: &str| {
                 if auto_pair {
                     println!("pairing request: code {code} - auto-paired (--auto-pair)");
@@ -198,7 +224,6 @@ async fn run() -> Result<(), String> {
                 ),
                 Err(err) => eprintln!("session failed: {err}"),
             }
-            sessions.fetch_sub(1, Ordering::Relaxed);
             eprintln!("session: tablet disconnected; waiting for the next connection");
         });
         // Reconnect loop: the tablet may return without a new process.

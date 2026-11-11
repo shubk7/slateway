@@ -140,12 +140,21 @@ pub struct KnownTablet {
 pub struct KnownTablets {
     path: PathBuf,
     tablets: Vec<KnownTablet>,
+    malformed: Vec<(usize, &'static str)>,
 }
 
+/// Longest accepted tablet name, in bytes.
+const MAX_NAME_LEN: usize = 128;
+
 impl KnownTablets {
-    /// Loads the store; a missing file is an empty store.
+    /// Loads the store; a missing file is an empty store. Malformed
+    /// lines are skipped and reported via [`KnownTablets::malformed`]
+    /// instead of failing the whole store: a lost entry only means
+    /// that one tablet pairs again, while a failed load would forget
+    /// every pairing.
     pub fn load(path: &Path) -> Result<Self, KeysError> {
         let mut tablets = Vec::new();
+        let mut malformed = Vec::new();
         match fs::read_to_string(path) {
             Ok(text) => {
                 for (number, line) in text.lines().enumerate() {
@@ -153,13 +162,10 @@ impl KnownTablets {
                     if line.is_empty() || line.starts_with('#') {
                         continue;
                     }
-                    tablets.push(parse_tablet_line(line).map_err(|problem| {
-                        KeysError::Malformed {
-                            file: "known-tablets",
-                            problem,
-                        }
-                    })?);
-                    let _ = number;
+                    match parse_tablet_line(line) {
+                        Ok(tablet) => tablets.push(tablet),
+                        Err(problem) => malformed.push((number + 1, problem)),
+                    }
                 }
             }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
@@ -168,7 +174,14 @@ impl KnownTablets {
         Ok(KnownTablets {
             path: path.to_path_buf(),
             tablets,
+            malformed,
         })
+    }
+
+    /// Lines skipped by [`KnownTablets::load`] as `(line number,
+    /// problem)`; the store still holds every parsable entry.
+    pub fn malformed(&self) -> &[(usize, &'static str)] {
+        &self.malformed
     }
 
     /// The tablet with this static public key, if paired.
@@ -178,7 +191,23 @@ impl KnownTablets {
 
     /// Adds a tablet (or updates an existing entry's name) and saves
     /// immediately, so a crash cannot forget a just-paired device.
+    ///
+    /// The name comes from the tablet's handshake payload and becomes
+    /// one line of the registry file: control characters (which could
+    /// forge extra lines) and oversized names are rejected.
     pub fn insert(&mut self, tablet: KnownTablet) -> Result<(), KeysError> {
+        if tablet.name.chars().any(|c| c.is_control()) {
+            return Err(KeysError::Malformed {
+                file: "known-tablets",
+                problem: "tablet name contains control characters",
+            });
+        }
+        if tablet.name.len() > MAX_NAME_LEN {
+            return Err(KeysError::Malformed {
+                file: "known-tablets",
+                problem: "tablet name exceeds 128 bytes",
+            });
+        }
         match self.tablets.iter_mut().find(|t| t.public == tablet.public) {
             Some(existing) => existing.name = tablet.name,
             None => self.tablets.push(tablet),
@@ -194,9 +223,15 @@ impl KnownTablets {
             text.push_str(&tablet.name);
             text.push('\n');
         }
-        let mut file = open_private_file(&self.path)?;
-        file.write_all(text.as_bytes())?;
-        file.sync_all()?;
+        // Atomic replace: a crash mid-write must not truncate the
+        // store (the next load would forget every pairing).
+        let tmp = self.path.with_extension("tmp");
+        {
+            let mut file = open_private_file(&tmp)?;
+            file.write_all(text.as_bytes())?;
+            file.sync_all()?;
+        }
+        fs::rename(&tmp, &self.path)?;
         Ok(())
     }
 }
@@ -372,20 +407,64 @@ mod tests {
     }
 
     #[test]
-    fn known_tablets_rejects_malformed_lines() {
+    fn known_tablets_skips_malformed_lines() {
+        // A malformed line costs its own entry only: the rest of the
+        // store stays usable and the skips are reported with their
+        // line numbers.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("known-tablets");
-        std::fs::write(&path, "not-hex no-key\n").unwrap();
-        assert!(matches!(
-            KnownTablets::load(&path),
-            Err(KeysError::Malformed {
-                file: "known-tablets",
-                ..
-            })
-        ));
+        std::fs::write(&path, "not-hex no-key\n\n# comment\naabb no-space-name\n").unwrap();
+        let store = KnownTablets::load(&path).unwrap();
+        assert!(store.tablets.is_empty());
+        let malformed = store.malformed();
+        assert_eq!(malformed.len(), 2);
+        assert_eq!(malformed[0].0, 1);
+        assert_eq!(malformed[1].0, 4);
 
-        std::fs::write(&path, "aabb no-space-name\n").unwrap();
-        assert!(KnownTablets::load(&path).is_err());
+        // A good line survives alongside the bad one.
+        let (private, public) = generate_keypair().unwrap();
+        let _ = private;
+        let key: [u8; KEY_LEN] = public.as_slice().try_into().unwrap();
+        let mut text = hex_encode(&key);
+        text.push_str(" good-tablet\nnot-hex bad\n");
+        std::fs::write(&path, text).unwrap();
+        let store = KnownTablets::load(&path).unwrap();
+        assert_eq!(store.tablets.len(), 1);
+        assert_eq!(store.tablets[0].name, "good-tablet");
+        assert_eq!(store.malformed().len(), 1);
+    }
+
+    /// A tablet name from the handshake payload cannot forge registry
+    /// lines or bloat the store.
+    #[test]
+    fn insert_rejects_hostile_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut known = KnownTablets::load(&dir.path().join("known-tablets")).unwrap();
+        let (private, public) = generate_keypair().unwrap();
+        let _ = private;
+        let public: [u8; KEY_LEN] = public.as_slice().try_into().unwrap();
+
+        let newline = KnownTablet {
+            public,
+            name: "Tab\nforged-line".into(),
+        };
+        assert!(known.insert(newline).is_err());
+
+        let long = KnownTablet {
+            public,
+            name: "x".repeat(129),
+        };
+        assert!(known.insert(long).is_err());
+
+        // A clean name still stores (and is reloadable).
+        let ok = KnownTablet {
+            public,
+            name: "SM-P620".into(),
+        };
+        known.insert(ok).unwrap();
+        let reloaded = KnownTablets::load(&dir.path().join("known-tablets")).unwrap();
+        assert_eq!(reloaded.tablets.len(), 1);
+        assert_eq!(reloaded.tablets[0].name, "SM-P620");
     }
 
     #[test]

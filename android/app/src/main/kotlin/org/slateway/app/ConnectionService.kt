@@ -57,6 +57,9 @@ class ConnectionService : Service() {
 
     override fun onDestroy() {
         running = false
+        // Unblock a session thread waiting on a pairing prompt: its
+        // session ends unconfirmed instead of hanging for the timeout.
+        pairing.cancel()
         try {
             socket?.close()
         } catch (_: Exception) {
@@ -250,7 +253,13 @@ class ConnectionService : Service() {
     private fun requestPairing(code: String) {
         val latch = CountDownLatch(1)
         synchronized(pairing) {
+            // Reset the decision when the prompt opens: a stale
+            // confirmed flag from an earlier prompt (or a tap after
+            // its timeout) must never vouch for a new pairing
+            // (docs/SECURITY.md - the code match is the anti-MITM
+            // check).
             pairing.code = code
+            pairing.confirmed = false
             pairing.latch = latch
         }
         val confirmed: Boolean
@@ -261,6 +270,7 @@ class ConnectionService : Service() {
         } finally {
             synchronized(pairing) {
                 pairing.code = null
+                pairing.confirmed = false
                 pairing.latch = null
             }
         }
@@ -329,15 +339,23 @@ class ConnectionService : Service() {
         @Volatile
         internal var latch: CountDownLatch? = null
 
-        /** The user confirmed the code on this tablet. */
+        /** The user confirmed the code on this tablet. Taps with no
+         * prompt pending are ignored: a stale confirm must never
+         * vouch for a later pairing. */
         fun confirm() {
-            confirmed = true
-            latch?.countDown()
+            synchronized(this) {
+                if (latch != null) {
+                    confirmed = true
+                    latch?.countDown()
+                }
+            }
         }
 
         /** The user dismissed the prompt. */
         fun cancel() {
-            latch?.countDown()
+            synchronized(this) {
+                latch?.countDown()
+            }
         }
     }
 }
