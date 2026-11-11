@@ -24,6 +24,12 @@ object TabletKeys {
     private const val WRAP_ALIAS = "slateway-noise-wrap"
     private const val KEY_FILE = "noise.key"
     private const val HOST_FILE = "known-hosts"
+
+    /** Trust store of the single-host builds: one raw 32-byte key.
+     * Migrated to [HOST_FILE] on first read; the rename without
+     * migration orphaned pairings on updated installs (the daemon
+     * still knew the tablet while the tablet re-prompted). */
+    private const val LEGACY_HOST_FILE = "known-host"
     private const val KEY_BITS = 256
     private const val NONCE_BYTES = 12
     private const val KEY_BYTES = 32
@@ -53,6 +59,7 @@ object TabletKeys {
      * first run after an install must reach pairing, not crash. */
     fun isTrustedHost(context: Context, publicKey: ByteArray): Boolean {
         require(publicKey.size == KEY_BYTES) { "host key must be $KEY_BYTES bytes" }
+        migrateLegacyHostFile(context)
         val file = hostKeysFile(context)
         if (!file.exists()) {
             Log.i(TAG, "keys: no trusted hosts stored yet (fresh install or forgotten)")
@@ -86,6 +93,32 @@ object TabletKeys {
     }
 
     private fun hostKeysFile(context: Context): File = File(context.filesDir, HOST_FILE)
+
+    /** One-time migration of the single-host trust store: `known-host`
+     * held one raw 32-byte key from before the trust-list rename, so
+     * updated installs forgot their pairing (the daemon recognized the
+     * tablet, the tablet demanded a new pairing). Converts the legacy
+     * key to a hex line and removes the old file; a legacy file with
+     * the wrong size is dropped with a warning. */
+    private fun migrateLegacyHostFile(context: Context) {
+        val legacy = File(context.filesDir, LEGACY_HOST_FILE)
+        if (!legacy.exists()) return
+        val current = hostKeysFile(context)
+        try {
+            if (!current.exists()) {
+                val key = legacy.readBytes()
+                if (key.size == KEY_BYTES) {
+                    current.appendText(hexEncode(key) + "\n")
+                    Log.i(TAG, "keys: migrated legacy single-host trust entry")
+                } else {
+                    Log.w(TAG, "keys: legacy trust file has ${key.size} bytes, expected $KEY_BYTES; dropped")
+                }
+            }
+            legacy.delete()
+        } catch (e: Exception) {
+            Log.e(TAG, "keys: legacy trust migration failed", e)
+        }
+    }
 
     private fun hexToBytes(text: String): ByteArray? {
         if (text.length != 2 * KEY_BYTES) return null
