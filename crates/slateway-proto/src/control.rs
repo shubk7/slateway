@@ -73,8 +73,7 @@ mod tests {
             [
                 // protocol_minor, field 2, varint 1 (minor 1 adds
                 // PairNeeded; major 0 is zero and omitted)
-                0x10, 0x01,
-                // app_version, field 3, length-delimited: "0.1.0"
+                0x10, 0x01, // app_version, field 3, length-delimited: "0.1.0"
                 0x1a, 0x05, b'0', b'.', b'1', b'.', b'0', // device_model, field 4: "Tab"
                 0x22, 0x03, b'T', b'a', b'b', // android_api, field 5, varint 30
                 0x28, 0x1e,
