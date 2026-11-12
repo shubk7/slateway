@@ -27,6 +27,9 @@ class WireTest {
         val hello = buildHello(appVersion = "0.1.0", deviceModel = "Tab", androidApi = 30)
         assertArrayEquals(
             byteArrayOf(
+                // protocol_minor, field 2, varint 1 (minor 1 adds
+                // PairNeeded; major 0 is zero and omitted)
+                0x10, 0x01,
                 // app_version, field 3: "0.1.0"
                 0x1a, 0x05, 0x30, 0x2e, 0x31, 0x2e, 0x30,
                 // device_model, field 4: "Tab"
