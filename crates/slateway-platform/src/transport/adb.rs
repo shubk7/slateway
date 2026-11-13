@@ -7,6 +7,9 @@
 
 use std::{net::SocketAddr, path::PathBuf, process, process::Stdio, time::Duration};
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
 use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::process::Command;
