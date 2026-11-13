@@ -43,28 +43,24 @@ impl AdbRunner for SystemAdb {
         // instead of inherited because the daemon retries the tunnel
         // registration periodically and one self-contained error line
         // beats adb scribbling on the terminal every 2 s.
-        let output = match tokio::time::timeout(
-            ADB_TIMEOUT,
-            Command::new(&self.path)
-                .args(args)
-                .stdout(Stdio::null())
-                .kill_on_drop(true)
-                .output(),
-        )
-        .await
-        {
-            Ok(result) => result?,
-            Err(_elapsed) => {
-                return Err(TransportError::Adb {
-                    step,
-                    code: None,
-                    detail: Some(format!(
-                        "timed out after {} s (is the adb server wedged?)",
-                        ADB_TIMEOUT.as_secs()
-                    )),
-                });
-            }
-        };
+        let mut command = Command::new(&self.path);
+        command.args(args).stdout(Stdio::null());
+        #[cfg(windows)]
+        command.creation_flags(CREATE_NO_WINDOW);
+        let output =
+            match tokio::time::timeout(ADB_TIMEOUT, command.kill_on_drop(true).output()).await {
+                Ok(result) => result?,
+                Err(_elapsed) => {
+                    return Err(TransportError::Adb {
+                        step,
+                        code: None,
+                        detail: Some(format!(
+                            "timed out after {} s (is the adb server wedged?)",
+                            ADB_TIMEOUT.as_secs()
+                        )),
+                    });
+                }
+            };
         if !output.status.success() {
             let detail = String::from_utf8_lossy(&output.stderr)
                 .lines()
@@ -213,13 +209,22 @@ impl Drop for AdbReverseTransport {
             return;
         };
         let tcp = format!("tcp:{port}");
-        let _ = process::Command::new(&self.adb_path)
+        let mut command = process::Command::new(&self.adb_path);
+        command
             .args(["reverse", "--remove", &tcp])
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
+            .stderr(Stdio::null());
+        #[cfg(windows)]
+        command.creation_flags(CREATE_NO_WINDOW);
+        let _ = command.spawn();
     }
 }
+
+/// The Win32 `CREATE_NO_WINDOW` flag: an adb child spawned by a
+/// windowless daemon (service, background process) must not flash a
+/// console window on Windows. No-op elsewhere.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 #[cfg(test)]
 mod tests {

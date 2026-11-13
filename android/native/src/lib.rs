@@ -39,14 +39,15 @@ fn throw(env: &mut JNIEnv, msg: &str) {
     let _ = env.throw_new("java/lang/IllegalStateException", msg);
 }
 
-/// Copies a Java byte array into Rust. Throws and returns empty on
-/// failure.
-fn read_bytes(env: &mut JNIEnv, array: &JByteArray, what: &str) -> Vec<u8> {
+/// Copies a Java byte array into Rust. Throws and returns `None` on
+/// failure; every caller must return to Kotlin immediately without
+/// doing further work while the exception is pending.
+fn read_bytes(env: &mut JNIEnv, array: &JByteArray, what: &str) -> Option<Vec<u8>> {
     match env.convert_byte_array(array) {
-        Ok(bytes) => bytes,
+        Ok(bytes) => Some(bytes),
         Err(err) => {
             throw(env, &format!("{what}: {err}"));
-            Vec::new()
+            None
         }
     }
 }
@@ -68,19 +69,26 @@ fn write_bytes<'local>(env: &mut JNIEnv<'local>, bytes: &[u8]) -> JByteArray<'lo
 /// `ptr` must be a pointer this library returned from `newInitiator`,
 /// `newResponder` or `intoTransport`, and must not have been passed to
 /// `freeSession` yet. The Kotlin side keeps exactly one pointer per
-/// session and closes it exactly once.
-unsafe fn session_from_ptr<'a>(env: &mut JNIEnv, ptr: i64, env_name: &str) -> &'a mut NoiseSession {
+/// session and closes it exactly once. Returns `None` after throwing
+/// when the contract is broken - a Rust panic must never unwind across
+/// the JNI boundary.
+unsafe fn session_from_ptr<'a>(
+    env: &mut JNIEnv,
+    ptr: i64,
+    env_name: &str,
+) -> Option<&'a mut NoiseSession> {
     let raw = ptr as usize as *mut NoiseSession;
     // SAFETY: the pointer originated from Box::into_raw in this
     // library; Kotlin honors the single-owner, no-use-after-free
     // contract documented above.
     match unsafe { raw.as_mut() } {
-        Some(session) => session,
+        Some(session) => Some(session),
         None => {
-            throw(env, &format!("{env_name}: null session pointer"));
-            // Only reachable on a programming error on the Kotlin side;
-            // dereferencing null would be worse, so panic loudly.
-            panic!("null Noise session pointer passed to {env_name}");
+            throw(
+                env,
+                &format!("{env_name}: invalid (null) session pointer"),
+            );
+            None
         }
     }
 }
@@ -166,7 +174,9 @@ pub extern "system" fn Java_org_slateway_app_NativeNoise_newResponder<'local>(
 }
 
 fn new_session(env: &mut JNIEnv, private_key: &JByteArray, initiator: bool, what: &str) -> i64 {
-    let private = read_bytes(env, private_key, what);
+    let Some(private) = read_bytes(env, private_key, what) else {
+        return 0;
+    };
     let mut private_array = [0u8; 32];
     if private.len() != 32 {
         throw(env, &format!("{what}: private key must be 32 bytes, got {}", private.len()));
@@ -214,13 +224,17 @@ pub extern "system" fn Java_org_slateway_app_NativeNoise_writeMessage<'local>(
     ptr: i64,
     payload: JByteArray<'local>,
 ) -> JByteArray<'local> {
-    let payload_bytes = read_bytes(&mut env, &payload, "writeMessage");
+    let Some(payload_bytes) = read_bytes(&mut env, &payload, "writeMessage") else {
+        return JByteArray::from(JObject::null());
+    };
     if payload_bytes.len() > MAX_MESSAGE {
         throw(&mut env, "writeMessage: payload exceeds the Noise limit");
         return JByteArray::from(JObject::null());
     }
     // SAFETY: pointer contract documented on session_from_ptr.
-    let session = unsafe { session_from_ptr(&mut env, ptr, "writeMessage") };
+    let Some(session) = (unsafe { session_from_ptr(&mut env, ptr, "writeMessage") }) else {
+        return JByteArray::from(JObject::null());
+    };
     let Some(state) = handshake(&mut env, session, "writeMessage") else {
         return JByteArray::from(JObject::null());
     };
@@ -243,13 +257,17 @@ pub extern "system" fn Java_org_slateway_app_NativeNoise_readMessage<'local>(
     ptr: i64,
     message: JByteArray<'local>,
 ) -> JByteArray<'local> {
-    let message_bytes = read_bytes(&mut env, &message, "readMessage");
+    let Some(message_bytes) = read_bytes(&mut env, &message, "readMessage") else {
+        return JByteArray::from(JObject::null());
+    };
     if message_bytes.len() > MAX_MESSAGE {
         throw(&mut env, "readMessage: message exceeds the Noise limit");
         return JByteArray::from(JObject::null());
     }
     // SAFETY: pointer contract documented on session_from_ptr.
-    let session = unsafe { session_from_ptr(&mut env, ptr, "readMessage") };
+    let Some(session) = (unsafe { session_from_ptr(&mut env, ptr, "readMessage") }) else {
+        return JByteArray::from(JObject::null());
+    };
     let Some(state) = handshake(&mut env, session, "readMessage") else {
         return JByteArray::from(JObject::null());
     };
@@ -271,7 +289,9 @@ pub extern "system" fn Java_org_slateway_app_NativeNoise_handshakeHash<'local>(
     ptr: i64,
 ) -> JByteArray<'local> {
     // SAFETY: pointer contract documented on session_from_ptr.
-    let session = unsafe { session_from_ptr(&mut env, ptr, "handshakeHash") };
+    let Some(session) = (unsafe { session_from_ptr(&mut env, ptr, "handshakeHash") }) else {
+        return JByteArray::from(JObject::null());
+    };
     match session {
         NoiseSession::Handshake(state) => write_bytes(&mut env, state.get_handshake_hash()),
         NoiseSession::Transport(_) => {
@@ -289,7 +309,9 @@ pub extern "system" fn Java_org_slateway_app_NativeNoise_remoteStatic<'local>(
     ptr: i64,
 ) -> JByteArray<'local> {
     // SAFETY: pointer contract documented on session_from_ptr.
-    let session = unsafe { session_from_ptr(&mut env, ptr, "remoteStatic") };
+    let Some(session) = (unsafe { session_from_ptr(&mut env, ptr, "remoteStatic") }) else {
+        return JByteArray::from(JObject::null());
+    };
     match session {
         NoiseSession::Handshake(state) => match state.get_remote_static() {
             Some(key) => write_bytes(&mut env, key),
@@ -310,6 +332,10 @@ pub extern "system" fn Java_org_slateway_app_NativeNoise_intoTransport<'local>(
     _class: JClass<'local>,
     ptr: i64,
 ) -> i64 {
+    if ptr == 0 {
+        throw(&mut env, "intoTransport: null session pointer");
+        return 0;
+    }
     // SAFETY: the pointer is consumed; Kotlin replaces it with the
     // returned one and never touches the old value again.
     let boxed = unsafe { take_session(ptr) };
@@ -360,13 +386,17 @@ fn transport_crypto<'local>(
     encrypting: bool,
     what: &str,
 ) -> JByteArray<'local> {
-    let bytes = read_bytes(env, input, what);
+    let Some(bytes) = read_bytes(env, input, what) else {
+        return JByteArray::from(JObject::null());
+    };
     if bytes.len() > MAX_MESSAGE {
         throw(env, &format!("{what}: input exceeds the Noise limit"));
         return JByteArray::from(JObject::null());
     }
     // SAFETY: pointer contract documented on session_from_ptr.
-    let session = unsafe { session_from_ptr(env, ptr, what) };
+    let Some(session) = (unsafe { session_from_ptr(env, ptr, what) }) else {
+        return JByteArray::from(JObject::null());
+    };
     let Some(state) = transport(env, session, what) else {
         return JByteArray::from(JObject::null());
     };

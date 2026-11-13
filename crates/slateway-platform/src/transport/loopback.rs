@@ -46,6 +46,31 @@ impl Default for LoopbackTransport {
     }
 }
 
+/// Binds the loopback listener.
+///
+/// On Windows, the previous daemon run's accepted connections sit in
+/// TIME_WAIT for up to four minutes and a plain rebind fails with
+/// `WSAEADDRINUSE`, so the restart-after-crash case needs
+/// `SO_REUSEADDR`. Tokio sets it on Unix but deliberately skips it on
+/// Windows (socket hijacking: another local process may bind the same
+/// port). Accepted: the listener is loopback-only and a hostile local
+/// process already owns the machine; a stale bind during restart is
+/// the more likely harm in practice.
+async fn bind_loopback(port: u16) -> Result<TcpListener, TransportError> {
+    #[cfg(windows)]
+    {
+        let socket = tokio::net::TcpSocket::new_v4()?;
+        socket.set_reuseaddr(true)?;
+        socket.bind(SocketAddr::from((Ipv4Addr::LOCALHOST, port)))?;
+        Ok(socket.listen(128)?)
+    }
+    #[cfg(not(windows))]
+    {
+        // Unix gets SO_REUSEADDR from TcpListener::bind already.
+        Ok(TcpListener::bind((Ipv4Addr::LOCALHOST, port)).await?)
+    }
+}
+
 #[async_trait]
 impl Transport for LoopbackTransport {
     async fn prepare(&mut self) -> Result<Option<SocketAddr>, TransportError> {
@@ -57,7 +82,7 @@ impl Transport for LoopbackTransport {
         if let Some(listener) = &self.listener {
             return Ok(Some(listener.local_addr()?));
         }
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, self.port)).await?;
+        let listener = bind_loopback(self.port).await?;
         let addr = listener.local_addr()?;
         self.listener = Some(listener);
         Ok(Some(addr))

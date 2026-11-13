@@ -67,6 +67,11 @@ fun readRecord(input: DataInputStream, buffer: ByteArray): Int {
     if (len == 0 || len > Protocol.MAX_RECORD) {
         throw ProtocolException("record length $len is out of range")
     }
+    if (len > buffer.size) {
+        // readFully would throw a bare IndexOutOfBoundsException after
+        // already consuming the length prefix, losing stream alignment.
+        throw ProtocolException("record length $len exceeds the ${buffer.size}-byte buffer")
+    }
     input.readFully(buffer, 0, len)
     return len
 }

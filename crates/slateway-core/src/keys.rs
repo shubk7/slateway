@@ -75,7 +75,15 @@ fn config_dir_from(
         if xdg.is_empty() {
             return Err("XDG_CONFIG_HOME is empty");
         }
-        return Ok(PathBuf::from(xdg).join("slateway"));
+        // XDG base-directory spec: a relative $XDG_CONFIG_HOME does
+        // not name a config directory and must be ignored - the
+        // platform default applies instead of trusting a path whose
+        // meaning depends on the process's working directory.
+        if !std::path::Path::new(xdg).is_absolute() {
+            // fall through to the home-derived default below
+        } else {
+            return Ok(PathBuf::from(xdg).join("slateway"));
+        }
     }
     let home = home.ok_or("no home directory; set SLATEWAY_CONFIG_DIR")?;
     if cfg!(windows) {
@@ -330,6 +338,13 @@ mod tests {
         let default = config_dir_from(None, None, Some(home)).unwrap();
         assert!(default.starts_with(home));
         assert!(default.ends_with("slateway"));
+
+        // A relative XDG_CONFIG_HOME violates the XDG base-directory
+        // spec and is ignored: the platform default applies.
+        let relative = std::ffi::OsStr::new("relative/config");
+        let with_relative = config_dir_from(None, Some(relative), Some(home)).unwrap();
+        assert!(with_relative.starts_with(home));
+        assert!(with_relative.ends_with("slateway"));
 
         // Empty variables are treated as unset-and-invalid.
         let empty = std::ffi::OsStr::new("");

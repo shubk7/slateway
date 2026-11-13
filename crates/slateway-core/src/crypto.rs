@@ -67,8 +67,10 @@ pub enum SessionError {
 
 /// Derives the 6-digit pairing code from the handshake hash
 /// (`docs/PROTOCOL.md`, "Noise records"): first 4 bytes big-endian mod
-/// 1,000,000, zero-padded.
-pub fn pairing_code(handshake_hash: &[u8]) -> String {
+/// 1,000,000, zero-padded. Takes exactly the SHA-256 length
+/// (`HandshakeDone::handshake_hash`), so it cannot index out of
+/// bounds.
+pub fn pairing_code(handshake_hash: &[u8; 32]) -> String {
     let value = u32::from_be_bytes([
         handshake_hash[0],
         handshake_hash[1],
@@ -726,7 +728,11 @@ mod tests {
 
     #[test]
     fn pairing_code_is_six_digits_and_deterministic() {
-        let hash = [0x12u8, 0x34, 0x56, 0x78, 0x9a];
+        let hash: [u8; 32] = {
+            let mut hash = [0u8; 32];
+            hash[..5].copy_from_slice(&[0x12u8, 0x34, 0x56, 0x78, 0x9a]);
+            hash
+        };
         let code = pairing_code(&hash);
         assert_eq!(code.len(), 6);
         assert!(code.chars().all(|c| c.is_ascii_digit()));
