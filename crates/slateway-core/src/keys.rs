@@ -78,8 +78,11 @@ fn config_dir_from(
         // XDG base-directory spec: a relative $XDG_CONFIG_HOME does
         // not name a config directory and must be ignored - the
         // platform default applies instead of trusting a path whose
-        // meaning depends on the process's working directory.
-        if !std::path::Path::new(xdg).is_absolute() {
+        // meaning depends on the process's working directory. A
+        // rooted path (`/xdg`) counts as absolute: it does not depend
+        // on the process's working directory (and the XDG variable is
+        // only ever meaningful on Unix, where rooted == absolute).
+        if !std::path::Path::new(xdg).has_root() {
             // fall through to the home-derived default below
         } else {
             return Ok(PathBuf::from(xdg).join("slateway"));
