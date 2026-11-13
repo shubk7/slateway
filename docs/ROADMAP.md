@@ -27,7 +27,7 @@ Feature IDs are defined in `SCOPE.md`. Latency targets are hypotheses: measure f
 
 ## M1 Mirror (D1, T1)
 
-- [ ] Capture: Linux portal and PipeWire, Windows capture API
+- [x] Capture: Linux portal and PipeWire, Windows capture API (Linux half hardware-verified by the maintainer on November 13, 2026; Windows half compile-verified via CI, runtime verification pending the next Windows boot)
 - [ ] Encoders: NVENC, QSV or VAAPI, x264 fallback, low-latency settings
 - [ ] Video channel, MediaCodec decode, newest-frame rendering
 - [ ] Touch as pointer on both OSes
