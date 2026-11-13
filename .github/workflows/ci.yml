@@ -37,12 +37,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # prost-build (slateway-proto) shells out to protoc; runners do
       # not ship it.
-      - name: Install protoc
+      - name: Install protoc and libpipewire
         shell: bash
         run: |
           if command -v apt-get >/dev/null; then
             sudo apt-get update -q
-            sudo apt-get install -y -q protobuf-compiler
+            # protobuf-compiler: prost-build (slateway-proto) shells out to
+            # protoc. libpipewire-0.3-dev: pipewire-sys generates its FFI
+            # bindings from the installed headers at build time; pipewire
+            # itself is a Linux-target-only dependency of slateway-linux.
+            sudo apt-get install -y -q protobuf-compiler libpipewire-0.3-dev
           elif command -v choco >/dev/null; then
             choco install protoc -y --no-progress
           else
