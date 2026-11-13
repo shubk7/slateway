@@ -8,7 +8,7 @@
 //! (AGENTS.md rule 2). The trait is deliberately blocking: the daemon
 //! owns the threading, the implementation owns its device handles.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
@@ -63,6 +63,14 @@ impl CaptureFrame {
             && self.data.len()
                 >= (self.height as usize - 1) * self.stride + self.width as usize * bpp
     }
+}
+
+/// Monotonic microseconds from a process-local origin, for frame
+/// timestamps (`CaptureFrame::pts_us`). Cross-machine clock math
+/// happens in the stats layer.
+pub fn monotonic_us() -> u64 {
+    static ORIGIN: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    ORIGIN.get_or_init(Instant::now).elapsed().as_micros() as u64
 }
 
 /// Static description of a running capture.

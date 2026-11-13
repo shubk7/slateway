@@ -7,7 +7,7 @@ Starting points, not guarantees. Verify each API against current documentation b
 | Area | Approach |
 |---|---|
 | Virtual display | Indirect Display Driver (IddCx, UMDF) built from an existing open-source IDD with a compatible license (spike S2) |
-| Capture | Windows.Graphics.Capture or DXGI Desktop Duplication, GPU textures; evaluate taking frames from the IDD swapchain |
+| Capture | Windows.Graphics.Capture into a D3D11 staging copy (`slateway-win::WgcCapture`); evaluate taking frames from the IDD swapchain |
 | Encode | `h264_nvenc` first, `h264_qsv` and `h264_amf` next, `libx264` ultrafast zerolatency as fallback |
 | Input | Synthetic pointer injection (`CreateSyntheticPointerDevice`, `InjectSyntheticPointerInput`) with touch and pen types, mapped to the target monitor rectangle |
 | Virtual camera | Media Foundation virtual camera API, Windows 11 only. Windows 10 unsupported initially |
@@ -19,7 +19,7 @@ Starting points, not guarantees. Verify each API against current documentation b
 
 | Area | Approach |
 |---|---|
-| Capture | xdg-desktop-portal ScreenCast into PipeWire, DMA-BUF where possible |
+| Capture | xdg-desktop-portal ScreenCast into PipeWire (`slateway-linux::PortalCapture`), DMA-BUF where possible |
 | Virtual display | Portal virtual-monitor source where the compositor supports it (check GNOME and KDE in spike S1). X11 fallback via xrandr monitors or a dummy output. EVDI is a possible fallback but is an out-of-tree kernel module |
 | Pointer and touch | RemoteDesktop portal (handles output mapping automatically) |
 | Pen | uinput tablet device with pressure and tilt, since portals do not carry pen data. Needs `/dev/uinput` access via a udev rule. Mapping to a specific output is compositor-specific |

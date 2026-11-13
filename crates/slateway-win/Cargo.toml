@@ -13,3 +13,24 @@ description = "Slateway Windows backends."
 # not gated on `cfg(windows)` must build everywhere.
 [lints]
 workspace = true
+
+# Windows Graphics.Capture + D3D11 staging copy. User-approved
+# dependencies as part of the M1 capture task (MIT OR Apache-2.0).
+# Gated so the crate still builds on other OSes.
+[target.'cfg(target_os = "windows")'.dependencies]
+slateway-platform = { version = "0.1.0", path = "../slateway-platform" }
+windows = { version = "0.62.2", features = [
+    "Foundation",
+    "Graphics_Capture",
+    "Graphics_DirectX",
+    "Graphics_DirectX_Direct3D11",
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Com",
+    "Win32_System_WinRT_Direct3D11",
+    "Win32_System_WinRT_Graphics_Capture",
+] }

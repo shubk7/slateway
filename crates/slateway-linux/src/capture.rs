@@ -40,6 +40,7 @@ use pw::{
 
 use slateway_platform::capture::{
     CaptureConfig, CaptureError, CaptureFrame, CaptureInfo, CaptureSource, FrameFormat,
+    monotonic_us,
 };
 
 /// A consent prompt, negotiation or teardown must finish inside this.
@@ -395,7 +396,7 @@ fn run_worker(portal: PortalStream, shared: Arc<Shared>, max_fps: u32) {
                 stride: chunk_stride,
                 format: info.format,
                 data: pixels[..relevant].to_vec(),
-                pts_us: frame_pts_us(),
+                pts_us: monotonic_us(),
             };
             if frame.is_consistent() {
                 data.shared.publish(frame);
@@ -432,13 +433,6 @@ fn run_worker(portal: PortalStream, shared: Arc<Shared>, max_fps: u32) {
     }
     shared.set(WorkerState::Stopped);
     // Drop order: stream, core, context, main loop.
-}
-
-fn frame_pts_us() -> u64 {
-    // Process-local monotonic origin; the stats layer does the
-    // cross-machine math.
-    static ORIGIN: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
-    ORIGIN.get_or_init(Instant::now).elapsed().as_micros() as u64
 }
 
 impl CaptureSource for PortalCapture {
