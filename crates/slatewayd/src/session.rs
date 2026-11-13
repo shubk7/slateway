@@ -55,6 +55,9 @@ pub struct SessionReport {
     pub device_name: String,
     /// Echo frames returned to the tablet.
     pub echoed: u64,
+    /// Frames read and not handled by any session stage (unknown
+    /// control types, non-echo experimental frames when echo is off).
+    pub discarded: u64,
     /// The session's clock-sync state (empty until the first tick).
     pub clock: ClockSync,
     /// Frame and byte counters plus the tablet's reports.
@@ -89,7 +92,7 @@ pub async fn serve_once<S>(
     host_private: &[u8; KEY_LEN],
     known: &SharedTablets,
     cfg: &SessionConfig,
-    confirm: &(dyn Fn(&str) -> bool + Send + Sync),
+    confirm: &(dyn Fn(&str, &str) -> bool + Send + Sync),
 ) -> Result<SessionReport, SessionFailure>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -144,10 +147,12 @@ where
     };
 
     // One operator prompt, when either side needs pairing. The prompt
-    // blocks this task only; the accept loop stays live.
+    // names the device so the operator knows which tablet is asking;
+    // it blocks this task only, the accept loop stays live.
+    let display_name = known_name.clone().unwrap_or_else(|| device_name.clone());
     if tablet_wants_pairing || daemon_wants_pairing {
         let code = slateway_core::pairing_code(&done.handshake_hash);
-        if !confirm(&code) {
+        if !confirm(&code, &display_name) {
             eprintln!("session: pairing refused");
             // Best effort: the tablet may still be waiting for an
             // answer; give it the orderly shutdown.
@@ -243,17 +248,56 @@ where
     // Session loop: frames from the tablet, and one Ping per tick. A
     // deadline-bounded read keeps the channel free for the tick's
     // write; the deadline is absolute so frequent frames cannot starve
-    // the clock sync.
+    // the clock sync. Kept as its own function so internal failures
+    // reach the tablet as Close before the session tears down.
     let mut clock = ClockSync::default();
     let mut stats = SessionStats::default();
+    let loop_result =
+        run_session_loop(&mut session, cfg, &mut clock, &mut stats, &mut report).await;
+    if let Err(err) = &loop_result {
+        let disconnect = matches!(err, SessionFailure::Session(e) if is_disconnect(e));
+        if !disconnect {
+            // The tablet did not go away: give it the reason. Best
+            // effort, the socket may already be half gone.
+            eprintln!("session: sending Close ({err})");
+            let _ = send_control(
+                &mut session,
+                CLOSE_TYPE,
+                &Close {
+                    reason: CloseReason::Error as i32,
+                }
+                .encode_to_vec(),
+            )
+            .await;
+        }
+    }
+    report.clock = clock;
+    report.stats = stats;
+    loop_result.map(|()| report)
+}
+
+/// The post-handshake loop: one Ping per tick, echo of experimental
+/// frames, clock and stats bookkeeping.
+async fn run_session_loop<S>(
+    session: &mut SecureSession<S>,
+    cfg: &SessionConfig,
+    clock: &mut ClockSync,
+    stats: &mut SessionStats,
+    report: &mut SessionReport,
+) -> Result<(), SessionFailure>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut scratch = vec![0u8; MAX_PLAINTEXT];
     let mut next_ping = tokio::time::Instant::now() + cfg.tick;
     let mut clock_announced = false;
+    let mut discarded_logged = false;
     loop {
         let read = tokio::time::timeout_at(next_ping, session.read_frame(&mut scratch)).await;
         match read {
             Err(_deadline_elapsed) => {
-                send_ping(&mut session).await?;
-                stats.record_out(PING_WIRE_LEN);
+                let ping_len = send_ping(session).await?;
+                stats.record_out(ping_len);
                 next_ping = tokio::time::Instant::now() + cfg.tick;
             }
             Ok(Err(err)) => {
@@ -319,26 +363,35 @@ where
                         report.echoed += 1;
                         stats.record_out(len);
                     }
-                    _ => {}
+                    _ => {
+                        // Unknown control types and non-echo
+                        // experimental frames are discarded by design
+                        // (docs/PROTOCOL.md); they stay visible in the
+                        // report instead of vanishing.
+                        report.discarded += 1;
+                        if !discarded_logged {
+                            discarded_logged = true;
+                            eprintln!(
+                                "session: discarding unhandled frames (first: channel {:?} type {})",
+                                header.channel, header.message_type
+                            );
+                        }
+                    }
                 }
                 if tokio::time::Instant::now() >= next_ping {
-                    send_ping(&mut session).await?;
+                    let ping_len = send_ping(session).await?;
+                    stats.record_out(ping_len);
                     next_ping = tokio::time::Instant::now() + cfg.tick;
                 }
             }
         }
     }
-    report.clock = clock;
-    report.stats = stats;
-    Ok(report)
+    Ok(())
 }
-
-/// Wire length of a Ping frame payload: one varint field, 0 at t0=0.
-const PING_WIRE_LEN: usize = 2;
 
 async fn send_ping<S: AsyncRead + AsyncWrite + Unpin>(
     session: &mut SecureSession<S>,
-) -> Result<(), SessionError> {
+) -> Result<usize, SessionError> {
     let ping = Ping { t0: monotonic_us() };
     let bytes = ping.encode_to_vec();
     session
@@ -352,7 +405,8 @@ async fn send_ping<S: AsyncRead + AsyncWrite + Unpin>(
             },
             &bytes,
         )
-        .await
+        .await?;
+    Ok(bytes.len())
 }
 
 /// Whether a session error means the tablet disconnected (as opposed
@@ -412,7 +466,7 @@ mod tests {
                 echo: true,
                 tick: Duration::from_millis(20),
             };
-            let confirm = |_code: &str| true;
+            let confirm = |_code: &str, _device: &str| true;
             serve_once(a, &host_priv, &known, &cfg, &confirm).await
         });
 
@@ -469,7 +523,7 @@ mod tests {
                 echo: true,
                 tick: Duration::from_millis(20),
             };
-            let confirm = |_code: &str| true;
+            let confirm = |_code: &str, _device: &str| true;
             serve_once(a, &host_priv, &known, &cfg, &confirm).await
         });
 
@@ -520,7 +574,7 @@ mod tests {
         // First run pairs and stores (the daemon's prompt auto-confirms).
         let (a, b) = tokio::io::duplex(4096);
         let client = run_client(&client_cfg, b);
-        let confirm = |_code: &str| true;
+        let confirm = |_code: &str, _device: &str| true;
         let server = serve_once(a, &host_priv, &known, &cfg, &confirm);
         let (summary, report) = tokio::join!(client, server);
         assert_eq!(summary.unwrap().frames, 1);
@@ -533,7 +587,7 @@ mod tests {
         let client = run_client(&client_cfg, b);
         let prompted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let prompt_counter = Arc::clone(&prompted);
-        let confirm = move |_code: &str| {
+        let confirm = move |_code: &str, _device: &str| {
             prompt_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             true
         };
@@ -577,7 +631,7 @@ mod tests {
             ..Default::default()
         };
         let client = run_client(&client_cfg, b);
-        let confirm = |_code: &str| true;
+        let confirm = |_code: &str, _device: &str| true;
         let server = serve_once(a, &host_priv, &known, &cfg, &confirm);
         let (summary, report) = tokio::join!(client, server);
         assert_eq!(summary.unwrap().frames, 1);
@@ -586,7 +640,7 @@ mod tests {
         // Second run with the same key: no prompt, no new pairing.
         let (a, b) = tokio::io::duplex(4096);
         let client = run_client(&client_cfg, a);
-        let confirm = |_code: &str| panic!("must not prompt for a known tablet");
+        let confirm = |_code: &str, _device: &str| panic!("must not prompt for a known tablet");
         let server = serve_once(b, &host_priv, &known, &cfg, &confirm);
         let (summary, report) = tokio::join!(client, server);
         let report = report.unwrap();

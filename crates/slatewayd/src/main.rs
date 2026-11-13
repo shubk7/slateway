@@ -180,9 +180,11 @@ async fn run() -> Result<(), String> {
             // Counts this session for the tunnel-refresh gate; the
             // guard keeps the count honest even if the task panics.
             let _session = SessionGuard::new(sessions);
-            let confirm = move |code: &str| {
+            let confirm = move |code: &str, device: &str| {
                 if auto_pair {
-                    println!("pairing request: code {code} - auto-paired (--auto-pair)");
+                    println!(
+                        "pairing request: code {code} for '{device}' - auto-paired (--auto-pair)"
+                    );
                     return true;
                 }
                 // Stray keystrokes re-prompt instead of killing the
@@ -191,7 +193,7 @@ async fn run() -> Result<(), String> {
                 // refused.
                 for attempt in 1..=3 {
                     println!(
-                        "pairing request: code {code} - confirm on the tablet, then enter y here ({attempt}/3)"
+                        "pairing request for '{device}': code {code} - confirm on the tablet, then enter y here ({attempt}/3)"
                     );
                     let mut line = String::new();
                     match std::io::stdin().read_line(&mut line) {
@@ -209,11 +211,12 @@ async fn run() -> Result<(), String> {
             match session::serve_once(stream, &host_private, &known, &cfg, &confirm).await {
                 Ok(report) => println!(
                     "session with '{}' ended: paired {}, echoed {} frames, \
-                     frames in {} / out {}, bytes in {} / out {}, \
+                     discarded {}, frames in {} / out {}, bytes in {} / out {}, \
                      clock rtt {} us, offset {} us, tablet stats {:?}",
                     report.device_name,
                     report.paired,
                     report.echoed,
+                    report.discarded,
                     report.stats.frames_in,
                     report.stats.frames_out,
                     report.stats.bytes_in,

@@ -21,7 +21,8 @@ pub mod input;
 pub use channel::{Channel, UnknownChannelError};
 pub use control::{
     CLOSE_TYPE, Close, CloseReason, DecodeLimits, HELLO_ACK_TYPE, HELLO_TYPE, Hello, HelloAck,
-    PING_TYPE, PONG_TYPE, Ping, Pong, STATS_TYPE, Screen, Stats, VideoCodec,
+    PAIR_NEEDED_TYPE, PING_TYPE, PONG_TYPE, PairNeeded, Ping, Pong, STATS_TYPE, Screen, Stats,
+    VideoCodec,
 };
 pub use frame::{FrameError, FrameHeader, HEADER_LEN, MAX_PAYLOAD_LEN};
 pub use input::{BatchEncodeError, EVENT_LEN, InputError, InputEvent};

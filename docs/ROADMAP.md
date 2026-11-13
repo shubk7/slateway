@@ -1,6 +1,6 @@
 # Roadmap
 
-Feature IDs are defined in `SCOPE.md`. Latency targets are hypotheses: measure first, then revise them here (`TESTING.md`). Current milestone: **M0**.
+Feature IDs are defined in `SCOPE.md`. Latency targets are hypotheses: measure first, then revise them here (`TESTING.md`). Current milestone: **M1**.
 
 ## Spikes (time-boxed; record outcomes in `DECISIONS.md`)
 
@@ -23,8 +23,7 @@ Feature IDs are defined in `SCOPE.md`. Latency targets are hypotheses: measure f
 - [x] Noise handshake, pairing code, key storage
 - [x] Clock sync, stats, latency overlay plumbing
 - [x] `tools/mock-tablet`
-
-**Exit:** authenticated, encrypted echo with RTT and clock offset on both tablets and both OSes; CI green.
+- [x] **Exit:** authenticated, encrypted echo with RTT and clock offset on both tablets and both OSes; CI green. (Verified by the maintainer on the S6 Lite and Tab A7 against the Linux and Windows daemons, November 2026.)
 
 ## M1 Mirror (D1, T1)
 
