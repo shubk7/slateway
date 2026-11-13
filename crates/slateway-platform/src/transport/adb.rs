@@ -5,13 +5,18 @@
 //! loopback over the USB link, then accepts the connection. Needs USB
 //! debugging on the tablet (`docs/DEVELOPMENT.md`, "Tablet setup").
 
-use std::{net::SocketAddr, path::PathBuf, process, process::Stdio};
+use std::{net::SocketAddr, path::PathBuf, process, process::Stdio, time::Duration};
 
 use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::process::Command;
 
 use super::{BoxStream, DEFAULT_PORT, LoopbackTransport, Transport, TransportError};
+
+/// Longest an adb invocation may run. Real commands finish in
+/// milliseconds; a longer run means a wedged adb server, and the
+/// reconnect loop must keep cycling instead of waiting forever.
+const ADB_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Executes adb commands. The seam exists for tests: the real runner
 /// spawns the adb executable; tests record the arguments and fake the
@@ -30,16 +35,36 @@ struct SystemAdb {
 #[async_trait]
 impl AdbRunner for SystemAdb {
     async fn run(&self, args: &[String], step: &'static str) -> Result<(), TransportError> {
-        // adb's stdout is noise (some versions echo the forwarded port
-        // on a successful reverse); stderr is captured instead of
-        // inherited because the daemon retries the tunnel registration
-        // periodically and one self-contained error line beats adb
-        // scribbling on the terminal every 2 s.
-        let output = Command::new(&self.path)
-            .args(args)
-            .stdout(Stdio::null())
-            .output()
-            .await?;
+        // A wedged adb server (version-mismatch prompt, stuck offline
+        // device, USB stack stall) must not freeze the reconnect loop:
+        // every invocation is bounded and the child is killed on
+        // expiry. adb's stdout is noise (some versions echo the
+        // forwarded port on a successful reverse); stderr is captured
+        // instead of inherited because the daemon retries the tunnel
+        // registration periodically and one self-contained error line
+        // beats adb scribbling on the terminal every 2 s.
+        let output = match tokio::time::timeout(
+            ADB_TIMEOUT,
+            Command::new(&self.path)
+                .args(args)
+                .stdout(Stdio::null())
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        {
+            Ok(result) => result?,
+            Err(_elapsed) => {
+                return Err(TransportError::Adb {
+                    step,
+                    code: None,
+                    detail: Some(format!(
+                        "timed out after {} s (is the adb server wedged?)",
+                        ADB_TIMEOUT.as_secs()
+                    )),
+                });
+            }
+        };
         if !output.status.success() {
             let detail = String::from_utf8_lossy(&output.stderr)
                 .lines()
@@ -70,7 +95,12 @@ pub struct AdbReverseTransport {
     runner: Arc<dyn AdbRunner>,
     /// adb executable path, kept for the drop cleanup spawn.
     adb_path: PathBuf,
+    /// Requested port; 0 means OS-assigned (resolved at prepare).
     port: u16,
+    /// The port actually bound by the last prepare(); the tunnel and
+    /// its removal use this, so a request for port 0 still registers
+    /// and cleans up the real port.
+    registered_port: Option<u16>,
 }
 
 impl AdbReverseTransport {
@@ -79,7 +109,8 @@ impl AdbReverseTransport {
         Self::with_port(DEFAULT_PORT)
     }
 
-    /// Transport on a fixed port, using `adb` from `PATH`.
+    /// Transport on a fixed port, using `adb` from `PATH`. Port 0
+    /// binds an OS-assigned port at prepare time.
     pub fn with_port(port: u16) -> Self {
         Self {
             listener: LoopbackTransport::with_port(port),
@@ -88,6 +119,7 @@ impl AdbReverseTransport {
             }),
             adb_path: PathBuf::from("adb"),
             port,
+            registered_port: None,
         }
     }
 
@@ -100,9 +132,10 @@ impl AdbReverseTransport {
         self
     }
 
-    /// The TCP port the tunnel and the listener use.
+    /// The TCP port the tunnel and the listener use; the registered
+    /// port once prepared (an OS-assigned one for a port-0 request).
     pub fn port(&self) -> u16 {
-        self.port
+        self.registered_port.unwrap_or(self.port)
     }
 
     /// Test seam: runs adb commands through `runner` instead of
@@ -116,6 +149,7 @@ impl AdbReverseTransport {
             // adb; a nonexistent path fails that spawn silently.
             adb_path: PathBuf::from("/nonexistent/slateway-test-adb"),
             port,
+            registered_port: None,
         }
     }
 
@@ -134,12 +168,15 @@ impl Default for AdbReverseTransport {
 impl Transport for AdbReverseTransport {
     async fn prepare(&mut self) -> Result<Option<SocketAddr>, TransportError> {
         // Bind first: when the tablet dials through the tunnel, the
-        // listener must already be there.
+        // listener must already be there. The tunnel registers the
+        // BOUND port, so a port-0 request resolves to its real port.
         let addr = self.listener.prepare().await?;
-        let tcp = format!("tcp:{}", self.port);
+        let addr = addr.ok_or(TransportError::NotReady)?;
+        self.registered_port = Some(addr.port());
+        let tcp = format!("tcp:{}", addr.port());
         self.run_adb(&["reverse".into(), tcp.clone(), tcp], "reverse")
             .await?;
-        Ok(addr)
+        Ok(Some(addr))
     }
 
     async fn stream(&mut self) -> Result<BoxStream, TransportError> {
@@ -152,7 +189,11 @@ impl AdbReverseTransport {
     /// teardown; dropping without it leaves the tunnel registered with
     /// the adb server.
     pub async fn cleanup(&mut self) -> Result<(), TransportError> {
-        let tcp = format!("tcp:{}", self.port);
+        // Nothing was ever registered (prepare never ran).
+        let Some(port) = self.registered_port else {
+            return Ok(());
+        };
+        let tcp = format!("tcp:{port}");
         self.run_adb(
             &["reverse".into(), "--remove".into(), tcp],
             "reverse --remove",
@@ -168,7 +209,10 @@ impl Drop for AdbReverseTransport {
         // is acceptable; the explicit `cleanup` is the reliable path).
         // Its output is silenced so a failing remove does not scribble
         // over the terminal after shutdown.
-        let tcp = format!("tcp:{}", self.port);
+        let Some(port) = self.registered_port else {
+            return;
+        };
+        let tcp = format!("tcp:{port}");
         let _ = process::Command::new(&self.adb_path)
             .args(["reverse", "--remove", &tcp])
             .stdout(Stdio::null())
@@ -283,6 +327,40 @@ mod tests {
                 format!("tcp:{port}"),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn port_zero_registers_and_cleans_the_bound_port() {
+        let adb = RecordingAdb::working();
+        let mut transport = AdbReverseTransport::with_runner(adb.clone(), 0);
+        let addr = transport.prepare().await.unwrap().unwrap();
+        assert_ne!(addr.port(), 0, "the OS assigned a real port");
+        assert_eq!(transport.port(), addr.port());
+        let register = vec![
+            "reverse".to_string(),
+            format!("tcp:{}", addr.port()),
+            format!("tcp:{}", addr.port()),
+        ];
+        assert_eq!(adb.recorded(), vec![register]);
+        // Cleanup targets the bound port, never the literal tcp:0.
+        transport.cleanup().await.unwrap();
+        let recorded = adb.recorded();
+        assert_eq!(
+            recorded[1],
+            vec![
+                "reverse".to_string(),
+                "--remove".to_string(),
+                format!("tcp:{}", addr.port()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn cleanup_without_prepare_is_a_no_op() {
+        let adb = RecordingAdb::working();
+        let mut transport = AdbReverseTransport::with_runner(adb.clone(), test_port());
+        transport.cleanup().await.unwrap();
+        assert!(adb.recorded().is_empty());
     }
 
     #[tokio::test]

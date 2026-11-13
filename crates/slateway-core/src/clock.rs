@@ -38,13 +38,30 @@ pub struct ClockSync {
 
 impl ClockSync {
     /// Adds the sample of one completed exchange and returns it.
-    pub fn on_pong(&mut self, t0: u64, t1: u64, t2: u64, t3: u64) -> Sample {
-        let t0 = t0 as i64;
-        let t1 = t1 as i64;
-        let t2 = t2 as i64;
-        let t3 = t3 as i64;
-        let rtt = (t3 - t0) - (t2 - t1);
-        let offset = ((t1 - t0) + (t2 - t3)) / 2;
+    /// Returns `None` for a physically impossible exchange - timestamps
+    /// that overflow the arithmetic, the tablet replying before it
+    /// received (`t2 < t1`), or a negative round trip - and does not
+    /// store it, so nonsense samples cannot poison the minimum-RTT
+    /// estimate. A truthful peer can never produce these; the values
+    /// arrive on the wire from an authenticated but not necessarily
+    /// sane peer.
+    pub fn on_pong(&mut self, t0: u64, t1: u64, t2: u64, t3: u64) -> Option<Sample> {
+        let (t0, t1, t2, t3) = (t0 as i64, t1 as i64, t2 as i64, t3 as i64);
+        // Tablet-side processing time: send after receive.
+        let tablet_time = t2.checked_sub(t1)?;
+        if tablet_time < 0 {
+            return None;
+        }
+        // RTT = (t3 - t0) - (t2 - t1); a real round trip is >= 0.
+        let rtt = t3.checked_sub(t0)?.checked_sub(tablet_time)?;
+        if rtt < 0 {
+            return None;
+        }
+        // Offset = ((t1 - t0) + (t2 - t3)) / 2.
+        let offset = t1
+            .checked_sub(t0)?
+            .checked_add(t2.checked_sub(t3)?)?
+            .checked_div(2)?;
         let sample = Sample {
             rtt_us: rtt,
             offset_us: offset,
@@ -53,7 +70,7 @@ impl ClockSync {
         if self.samples.len() > SAMPLE_WINDOW {
             self.samples.remove(0);
         }
-        sample
+        Some(sample)
     }
 
     /// The estimate from the minimum-RTT sample in the window; none
@@ -118,7 +135,10 @@ where
     if pong.t0 != t0 {
         return Err(SessionError::Protocol("Pong t0 does not match the Ping"));
     }
-    Ok(sync.on_pong(pong.t0, pong.t1, pong.t2, t3))
+    sync.on_pong(pong.t0, pong.t1, pong.t2, t3)
+        .ok_or(SessionError::Protocol(
+            "Pong timestamps are physically impossible",
+        ))
 }
 
 #[cfg(test)]
@@ -135,7 +155,7 @@ mod tests {
         let mut sync = ClockSync::default();
         // Host sends at 1000, tablet receives at 1500, replies at 1600,
         // host receives at 2100: 500 us each way.
-        let sample = sync.on_pong(1000, 1500, 1600, 2100);
+        let sample = sync.on_pong(1000, 1500, 1600, 2100).unwrap();
         assert_eq!(sample.rtt_us, 1000);
         assert_eq!(sample.offset_us, 0);
     }
@@ -145,7 +165,7 @@ mod tests {
         let mut sync = ClockSync::default();
         // The tablet's clock runs 100 us ahead: t1 and t2 are both
         // shifted up.
-        let sample = sync.on_pong(1000, 1600, 1700, 2100);
+        let sample = sync.on_pong(1000, 1600, 1700, 2100).unwrap();
         assert_eq!(sample.rtt_us, 1000);
         assert_eq!(sample.offset_us, 100);
     }
@@ -153,7 +173,7 @@ mod tests {
     #[test]
     fn tablet_behind_shows_negative_offset() {
         let mut sync = ClockSync::default();
-        let sample = sync.on_pong(1000, 1400, 1500, 2100);
+        let sample = sync.on_pong(1000, 1400, 1500, 2100).unwrap();
         assert_eq!(sample.rtt_us, 1000);
         assert_eq!(sample.offset_us, -100);
     }
@@ -161,9 +181,9 @@ mod tests {
     #[test]
     fn estimate_uses_the_minimum_rtt_sample() {
         let mut sync = ClockSync::default();
-        sync.on_pong(0, 500, 600, 3000); // rtt 2500, offset -550
-        let best = sync.on_pong(0, 500, 600, 1000); // rtt 500, offset 50
-        sync.on_pong(0, 500, 600, 2000); // rtt 1500, offset -250
+        let _ = sync.on_pong(0, 500, 600, 3000); // rtt 2500, offset -550
+        let best = sync.on_pong(0, 500, 600, 1000).unwrap(); // rtt 500, offset 50
+        let _ = sync.on_pong(0, 500, 600, 2000); // rtt 1500, offset -250
         assert_eq!(sync.estimate(), Some(best));
         assert_eq!(sync.samples().len(), 3);
     }
@@ -172,7 +192,7 @@ mod tests {
     fn sample_window_is_bounded() {
         let mut sync = ClockSync::default();
         for i in 0..(SAMPLE_WINDOW as u64 + 10) {
-            sync.on_pong(i * 1000, i * 1000 + 400, i * 1000 + 500, i * 1000 + 1000);
+            let _ = sync.on_pong(i * 1000, i * 1000 + 400, i * 1000 + 500, i * 1000 + 1000);
         }
         assert_eq!(sync.samples().len(), SAMPLE_WINDOW);
     }
@@ -180,6 +200,37 @@ mod tests {
     #[test]
     fn estimate_is_none_before_the_first_exchange() {
         assert_eq!(ClockSync::default().estimate(), None);
+    }
+
+    /// Physically impossible exchanges are rejected, never stored, and
+    /// must not panic on extreme timestamps (checked arithmetic): the
+    /// values arrive on the wire from an authenticated but not
+    /// necessarily sane peer.
+    #[test]
+    fn impossible_samples_are_rejected() {
+        let mut sync = ClockSync::default();
+        // The tablet cannot reply before it received (t2 < t1).
+        assert_eq!(sync.on_pong(1000, 1500, 1400, 2100), None);
+        // A round trip cannot be negative.
+        assert_eq!(sync.on_pong(1000, 1500, 4000, 2100), None);
+        // Extreme wire values must not panic the arithmetic (checked
+        // ops reject instead), and a negative round trip at the far
+        // end of the range is still caught.
+        assert_eq!(sync.on_pong(u64::MAX, 0, u64::MAX, 0), None);
+        assert_eq!(sync.on_pong(0, u64::MAX, u64::MAX, u64::MAX), None);
+        assert_eq!(
+            sync.on_pong(u64::MAX, u64::MAX - 5, u64::MAX, u64::MAX - 5),
+            None
+        );
+        assert_eq!(
+            sync.estimate(),
+            None,
+            "rejected samples must not enter the window"
+        );
+        // A valid sample after the nonsense ones still works.
+        let sample = sync.on_pong(1000, 1500, 1600, 2100);
+        assert!(sample.is_some());
+        assert_eq!(sync.estimate(), sample);
     }
 
     /// Suppresses the unused-import lint for Stats in this module's

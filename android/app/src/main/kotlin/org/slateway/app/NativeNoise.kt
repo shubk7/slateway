@@ -69,7 +69,12 @@ class NoiseSession private constructor(@Volatile private var ptr: Long) : AutoCl
     /** Finishes the handshake; the session switches to encrypted
      * transport. */
     fun intoTransport() {
-        ptr = NativeNoise.intoTransport(requireOpen())
+        // Consume the pointer BEFORE the call: the native side frees
+        // the old session even on its error paths, so a stale ptr here
+        // would be a double free when close() runs later.
+        val current = requireOpen()
+        ptr = 0
+        ptr = NativeNoise.intoTransport(current)
     }
 
     fun encrypt(plaintext: ByteArray): ByteArray = NativeNoise.encrypt(requireOpen(), plaintext)

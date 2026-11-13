@@ -271,10 +271,20 @@ where
                 match (header.channel, header.message_type) {
                     (Channel::Control, PONG_TYPE) => {
                         let pong = Pong::decode(payload)?;
-                        clock.on_pong(pong.t0, pong.t1, pong.t2, monotonic_us());
-                        if let (false, Some(estimate)) = (clock_announced, clock.estimate()) {
-                            clock_announced = true;
-                            eprintln!("session: clock sync live (rtt {} us)", estimate.rtt_us);
+                        match clock.on_pong(pong.t0, pong.t1, pong.t2, monotonic_us()) {
+                            None => {
+                                eprintln!("session: rejected a physically impossible clock sample")
+                            }
+                            Some(_sample) => {
+                                if let (false, Some(estimate)) = (clock_announced, clock.estimate())
+                                {
+                                    clock_announced = true;
+                                    eprintln!(
+                                        "session: clock sync live (rtt {} us)",
+                                        estimate.rtt_us
+                                    );
+                                }
+                            }
                         }
                     }
                     (Channel::Control, STATS_TYPE) => {

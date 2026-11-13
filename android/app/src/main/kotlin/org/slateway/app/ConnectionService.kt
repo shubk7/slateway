@@ -30,7 +30,12 @@ import java.util.concurrent.TimeUnit
  */
 class ConnectionService : Service() {
 
+    // Volatile: written by the session thread and its finally block,
+    // read by the main thread in onStartCommand (lost-click window).
+    @Volatile
     private var socket: Socket? = null
+
+    @Volatile
     private var running = false
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -50,7 +55,16 @@ class ConnectionService : Service() {
         }
         if (!running) {
             running = true
-            Thread { runSession(port) }.start()
+            // startId rides along: the finishing thread stops only its
+            // own start, so a click arriving mid-shutdown keeps the
+            // service alive for the newer intent.
+            Thread { runSession(port, startId) }.start()
+        } else {
+            // A session is already live; this click is intentionally
+            // ignored (the status notification reflects the session).
+            // The residual race - a click in the shutdown window - is
+            // accepted for M0 and closed in M1's UI work.
+            Log.i(TAG, "connect requested while a session is running; ignored")
         }
         return START_NOT_STICKY
     }
@@ -68,8 +82,8 @@ class ConnectionService : Service() {
         super.onDestroy()
     }
 
-    private fun runSession(port: Int) {
-        val tag = "slateway"
+    private fun runSession(port: Int, startId: Int) {
+        val tag = TAG
         // The step the session thread is in; shown on disconnect so a
         // failure says WHERE it happened, not just the exception class.
         var stage = "starting"
@@ -129,7 +143,9 @@ class ConnectionService : Service() {
                     if (!trusted) {
                         // This tablet does not know the host: announce it
                         // so the host shows its prompt too, then confirm
-                        // here.
+                        // here. The code lives in the notification (the
+                        // operator-facing UI), never in logcat - it is
+                        // the anti-MITM secret for the prompt window.
                         channel.writeFrame(
                             output,
                             FrameHeader(Protocol.CHANNEL_CONTROL, 0, Protocol.PAIR_NEEDED_TYPE, 0, 0),
@@ -137,7 +153,7 @@ class ConnectionService : Service() {
                         )
                         Log.i(tag, "pairing: tablet needs pairing, PairNeeded sent")
                         update("pairing: confirm code $code on host and tablet")
-                        Log.i(tag, "pairing: prompting for code $code")
+                        Log.i(tag, "pairing: prompting for the code (shown in the notification)")
                         requestPairing(code)
                         Log.i(tag, "pairing: confirmed on the tablet")
                     }
@@ -168,7 +184,8 @@ class ConnectionService : Service() {
                             Protocol.PAIR_NEEDED_TYPE -> {
                                 // The host does not know this tablet: it
                                 // asked for the code confirmation even
-                                // though the tablet trusts it.
+                                // though the tablet trusts it. The code
+                                // goes to the notification, not logcat.
                                 Log.i(tag, "pairing: host requests pairing confirmation")
                                 update("pairing: confirm code $code on host and tablet")
                                 requestPairing(code)
@@ -214,19 +231,31 @@ class ConnectionService : Service() {
                     while (true) {
                         val (frame, payload) = channel.readFrame(input)
                         if (frame.channel == Protocol.CHANNEL_CONTROL && frame.type == Protocol.PING_TYPE) {
-                            // t1 stamps the ping's arrival and t2 the
-                            // reply's send; stamping t1 any earlier
-                            // would count idle waiting into the host's
-                            // RTT math (docs/PROTOCOL.md, "Clocks").
-                            val t1 = android.os.SystemClock.elapsedRealtimeNanos() / 1000
-                            val pong = buildPong(payload, t1, android.os.SystemClock.elapsedRealtimeNanos() / 1000)
-                            channel.writeFrame(
-                                output,
-                                FrameHeader(Protocol.CHANNEL_CONTROL, 0, Protocol.PONG_TYPE, pong.size, 0),
-                                pong,
-                            )
-                            pongs++
-                            if (pongs == 1) Log.i(tag, "session: first clock ping answered")
+                            // A malformed Ping is discarded like any
+                            // other frame, not fatal: the next tick
+                            // resyncs (the data is authenticated, so
+                            // this would be a host bug, not an attack).
+                            val pong = try {
+                                // t1 stamps the ping's arrival and t2
+                                // the reply's send; stamping t1 any
+                                // earlier would count idle waiting
+                                // into the host's RTT math
+                                // (docs/PROTOCOL.md, "Clocks").
+                                val t1 = android.os.SystemClock.elapsedRealtimeNanos() / 1000
+                                buildPong(payload, t1, android.os.SystemClock.elapsedRealtimeNanos() / 1000)
+                            } catch (e: Exception) {
+                                Log.w(tag, "session: discarded a malformed ping", e)
+                                null
+                            }
+                            if (pong != null) {
+                                channel.writeFrame(
+                                    output,
+                                    FrameHeader(Protocol.CHANNEL_CONTROL, 0, Protocol.PONG_TYPE, pong.size, 0),
+                                    pong,
+                                )
+                                pongs++
+                                if (pongs == 1) Log.i(tag, "session: first clock ping answered")
+                            }
                         }
                         // Other frames are discarded for now.
                     }
@@ -241,7 +270,8 @@ class ConnectionService : Service() {
         } finally {
             synchronized(this) { socket = null }
             running = false
-            stopSelf()
+            // Only this start: a newer intent keeps the service alive.
+            stopSelf(startId)
         }
     }
 
@@ -307,6 +337,7 @@ class ConnectionService : Service() {
     companion object {
         const val EXTRA_PORT = "port"
         const val DEFAULT_PORT = Protocol.DEFAULT_PORT
+        private const val TAG = "slateway"
         private const val CHANNEL_ID = "connection"
         private const val NOTIFICATION_ID = 1
         private const val CONNECT_TIMEOUT_MS = 5000
