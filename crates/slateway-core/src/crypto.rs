@@ -10,6 +10,7 @@
 //! codec parses. The host responds in the fixed three-message XX
 //! handshake; the tablet initiates.
 
+use std::collections::VecDeque;
 use std::io;
 
 use slateway_proto::frame::{FrameHeader, HEADER_LEN, MAX_PAYLOAD_LEN};
@@ -183,6 +184,9 @@ impl SessionHandshake {
                 record: self.record,
                 staging: Box::new([0u8; MAX_RECORD]),
                 pending: Vec::new(),
+                inflight: Vec::new(),
+                outbox: VecDeque::new(),
+                outbox_off: 0,
             },
         })
     }
@@ -234,6 +238,18 @@ pub struct SecureSession<S> {
     staging: Box<[u8; MAX_RECORD]>,
     /// Decrypted bytes not yet consumed by the frame parser.
     pending: Vec<u8>,
+    /// Wire bytes consumed from the stream but not yet decrypted as a
+    /// complete record (length prefix included). Real bytes only, so a
+    /// cancelled read resumes exactly where it stopped and no stream
+    /// byte is ever lost.
+    inflight: Vec<u8>,
+    /// Records already encrypted (their nonces are burned) and queued
+    /// for the wire, length prefix included, in order. A cancelled
+    /// write flushes them on the next write, so the stream stays
+    /// record-aligned and abandoned frames are delivered whole.
+    outbox: VecDeque<Vec<u8>>,
+    /// Bytes of `outbox` front already on the wire.
+    outbox_off: usize,
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin> SecureSession<S> {
@@ -272,11 +288,20 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SecureSession<S> {
     /// Encrypts and writes one frame. Frames larger than one record
     /// are split; the peer's frame parser reassembles them from the
     /// decrypted stream.
+    ///
+    /// Cancel-safe: encrypted records queue in the outbox and flush
+    /// here and on every later write, so a cancelled write still
+    /// delivers its records whole and the stream stays record-aligned
+    /// (encrypting burns nonces in order; the wire must consume them
+    /// in the same order).
     pub async fn write_frame(
         &mut self,
         header: FrameHeader,
         payload: &[u8],
     ) -> Result<(), SessionError> {
+        // Deliver anything a previously cancelled write left queued
+        // before this frame's records join the queue.
+        self.flush_outbox().await?;
         let frame_len = HEADER_LEN + payload.len();
         if frame_len > MAX_FRAME {
             return Err(SessionError::TooLarge {
@@ -302,27 +327,115 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SecureSession<S> {
             let ciphertext_len = self
                 .noise
                 .write_message(&self.staging[..plaintext_len], self.record.as_mut())?;
-            write_record(&mut self.stream, &self.record[..ciphertext_len]).await?;
+            let mut wire = Vec::with_capacity(2 + ciphertext_len);
+            wire.extend_from_slice(&(ciphertext_len as u16).to_le_bytes());
+            wire.extend_from_slice(&self.record[..ciphertext_len]);
+            self.outbox.push_back(wire);
             if offset == payload.len() {
-                return Ok(());
+                break;
             }
+        }
+        self.flush_outbox().await
+    }
+
+    /// Writes queued records to the wire. Cancel-safe: the write
+    /// offset survives in the session, and a partial write resumes on
+    /// the next call before anything new is queued.
+    async fn flush_outbox(&mut self) -> Result<(), SessionError> {
+        while let Some(front_len) = self.outbox.front().map(Vec::len) {
+            while self.outbox_off < front_len {
+                let front = self.outbox.front().expect("front checked above");
+                let wrote = self.stream.write(&front[self.outbox_off..]).await?;
+                if wrote == 0 {
+                    return Err(SessionError::Io(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "stream write made no progress",
+                    )));
+                }
+                self.outbox_off += wrote;
+            }
+            self.outbox.pop_front();
+            self.outbox_off = 0;
+        }
+        Ok(())
+    }
+
+    /// Pulls one ciphertext record from the stream and decrypts it
+    /// into `pending`. Incremental and cancel-safe: every wire byte
+    /// lands in `inflight` as soon as it is read, so a cancelled poll
+    /// (a read wrapped in a timeout, the norm under load) resumes
+    /// exactly where it stopped and the Noise nonce stream never
+    /// desyncs.
+    async fn pull_record(&mut self) -> Result<(), SessionError> {
+        loop {
+            if self.inflight.len() >= 2 {
+                let len = u16::from_le_bytes([self.inflight[0], self.inflight[1]]) as usize;
+                if len == 0 {
+                    return Err(SessionError::TooLarge {
+                        what: "record",
+                        len,
+                        max: MAX_RECORD,
+                    });
+                }
+                if self.inflight.len() >= 2 + len {
+                    let start = self.pending.len();
+                    self.pending.resize(start + len, 0);
+                    match self
+                        .noise
+                        .read_message(&self.inflight[2..2 + len], &mut self.pending[start..])
+                    {
+                        Ok(n) => {
+                            self.pending.truncate(start + n);
+                            self.inflight.drain(..2 + len);
+                            return Ok(());
+                        }
+                        Err(err) => {
+                            // Keep the buffer invariant: no garbage tail
+                            // after a failed decrypt.
+                            self.pending.truncate(start);
+                            return Err(err.into());
+                        }
+                    }
+                }
+            }
+            self.fill_inflight().await?;
         }
     }
 
-    /// Decrypts the next record and appends it to the pending buffer.
-    async fn pull_record(&mut self) -> Result<(), SessionError> {
-        let len = read_record(&mut self.stream, self.record.as_mut()).await?;
-        let start = self.pending.len();
-        self.pending.resize(start + len, 0);
-        let n = self
-            .noise
-            .read_message(&self.record[..len], &mut self.pending[start..])?;
-        self.pending.truncate(start + n);
+    /// Reads more wire bytes into `inflight`. Single `read` calls only
+    /// (never `read_exact`, whose multi-read state lives in the future
+    /// and dies with it); each completed read is appended to the
+    /// session immediately.
+    async fn fill_inflight(&mut self) -> Result<(), SessionError> {
+        let want = if self.inflight.len() < 2 {
+            2 - self.inflight.len()
+        } else {
+            let len = u16::from_le_bytes([self.inflight[0], self.inflight[1]]) as usize;
+            2 + len - self.inflight.len()
+        };
+        let mut scratch = [0u8; 4096];
+        let mut got = 0;
+        while got < want {
+            let take = (want - got).min(scratch.len());
+            let n = self.stream.read(&mut scratch[..take]).await?;
+            if n == 0 {
+                return Err(SessionError::Io(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "stream closed mid-record",
+                )));
+            }
+            self.inflight.extend_from_slice(&scratch[..n]);
+            got += n;
+        }
         Ok(())
     }
 }
 
 /// Reads one record: `u16` little-endian length plus ciphertext.
+/// Handshake-only: `read_exact` keeps its multi-read state in the
+/// future, so a cancelled call loses consumed bytes - the transport
+/// path uses the resumable `inflight` machinery instead. The handshake
+/// is a fixed three-message exchange with no timeout wrappers.
 async fn read_record<S: AsyncRead + Unpin>(
     stream: &mut S,
     buf: &mut [u8; MAX_RECORD],
@@ -342,6 +455,8 @@ async fn read_record<S: AsyncRead + Unpin>(
 }
 
 /// Writes one record: `u16` little-endian length plus ciphertext.
+/// Handshake-only (see [`read_record`]); the transport path queues
+/// records in the outbox instead.
 async fn write_record<S: AsyncWrite + Unpin>(
     stream: &mut S,
     ciphertext: &[u8],
@@ -363,6 +478,10 @@ async fn write_record<S: AsyncWrite + Unpin>(
 mod tests {
     use super::*;
     use slateway_proto::Channel;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::task::{Context, Poll};
     use tokio::io::duplex;
 
     /// A placeholder device name for the tablet's final handshake
@@ -406,6 +525,194 @@ mod tests {
 
     fn key(private: &[u8]) -> &[u8; KEY_LEN] {
         private.try_into().unwrap()
+    }
+
+    /// Test sink: writes stay pending while the flag is set, so a
+    /// write future can be cancelled deterministically mid-flush.
+    struct StallWrites<S> {
+        inner: S,
+        stall: Arc<AtomicBool>,
+    }
+
+    impl<S: AsyncWrite + Unpin> AsyncWrite for StallWrites<S> {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            if self.stall.load(Ordering::SeqCst) {
+                return Poll::Pending;
+            }
+            Pin::new(&mut self.inner).poll_write(cx, buf)
+        }
+
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.inner).poll_flush(cx)
+        }
+
+        fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.inner).poll_shutdown(cx)
+        }
+    }
+
+    impl<S: AsyncRead + Unpin> AsyncRead for StallWrites<S> {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.get_mut().inner).poll_read(cx, buf)
+        }
+    }
+
+    /// Reads survive cancellation mid-record: through a 1-byte pipe
+    /// every record arrives in fragments and each timeout cancels the
+    /// read between fragments. The frame must still arrive intact - a
+    /// cancelled read must not lose consumed bytes or desync the Noise
+    /// stream (the M1 landmine: reads under timeouts are the norm
+    /// under load).
+    #[tokio::test]
+    async fn read_frame_survives_cancellation_mid_record() {
+        let (initiator_priv, _) = generate_keypair().unwrap();
+        let (responder_priv, _) = generate_keypair().unwrap();
+        let (a, b) = duplex(1);
+        let (tablet, host) = tokio::join!(
+            async {
+                SessionHandshake::initiator(key(&initiator_priv))
+                    .unwrap()
+                    .complete(a, DEVICE_NAME)
+                    .await
+                    .unwrap()
+            },
+            async {
+                SessionHandshake::responder(key(&responder_priv))
+                    .unwrap()
+                    .complete(b, &[])
+                    .await
+                    .unwrap()
+            }
+        );
+        let mut tablet = tablet.session;
+        let mut host = host.session;
+
+        // Too big to cross the 1-byte pipe inside one timeout window.
+        let payload: Vec<u8> = (0..20_000u32).map(|i| (i % 251) as u8).collect();
+        let writer_payload = payload.clone();
+        let writer = tokio::spawn(async move {
+            let header = FrameHeader {
+                channel: Channel::Experimental { id: 200 },
+                flags: 0,
+                message_type: 1,
+                payload_len: writer_payload.len() as u32,
+                pts_us: 0,
+            };
+            tablet.write_frame(header, &writer_payload).await.unwrap();
+            tablet.write_frame(header, &writer_payload).await.unwrap();
+        });
+
+        let mut got = vec![0u8; payload.len()];
+        let mut arrived = false;
+        for _ in 0..100_000 {
+            match tokio::time::timeout(
+                std::time::Duration::from_millis(2),
+                host.read_frame(&mut got),
+            )
+            .await
+            {
+                Ok(Ok((_, len))) => {
+                    assert_eq!(len, payload.len());
+                    assert_eq!(got, payload, "frame content corrupted across cancellations");
+                    arrived = true;
+                    break;
+                }
+                Ok(Err(err)) => panic!("read failed under cancellation: {err}"),
+                Err(_elapsed) => continue, // cancelled mid-record: resumable
+            }
+        }
+        assert!(arrived, "the frame never completed under cancellation");
+        // The stream stayed aligned: the second frame decrypts too.
+        host.read_frame(&mut got).await.unwrap();
+        assert_eq!(got, payload);
+        writer.await.unwrap();
+    }
+
+    /// Writes survive cancellation mid-flush: a cancelled write_frame
+    /// leaves its records queued (their nonces are burned), and the
+    /// NEXT write delivers them before its own. The peer must see both
+    /// frames whole, in order, and decryptable.
+    #[tokio::test]
+    async fn write_frame_survives_cancellation_mid_flush() {
+        let (initiator_priv, _) = generate_keypair().unwrap();
+        let (responder_priv, _) = generate_keypair().unwrap();
+        let (a, b) = duplex(4096);
+        let (tablet_done, host_done) = tokio::join!(
+            async {
+                SessionHandshake::initiator(key(&initiator_priv))
+                    .unwrap()
+                    .complete(a, DEVICE_NAME)
+                    .await
+                    .unwrap()
+            },
+            async {
+                SessionHandshake::responder(key(&responder_priv))
+                    .unwrap()
+                    .complete(b, &[])
+                    .await
+                    .unwrap()
+            }
+        );
+        let stall = Arc::new(AtomicBool::new(true));
+        let tablet = tablet_done.session;
+        let mut tablet = SecureSession {
+            stream: StallWrites {
+                inner: tablet.stream,
+                stall: Arc::clone(&stall),
+            },
+            noise: tablet.noise,
+            record: tablet.record,
+            staging: tablet.staging,
+            pending: tablet.pending,
+            inflight: tablet.inflight,
+            outbox: tablet.outbox,
+            outbox_off: tablet.outbox_off,
+        };
+        let mut host = host_done.session;
+
+        let first: Vec<u8> = vec![0xAA; 200];
+        let second: Vec<u8> = vec![0xBB; 400];
+        let reader = tokio::spawn(async move {
+            let mut buf = vec![0u8; 400];
+            let (_, len_a) = host.read_frame(&mut buf).await.unwrap();
+            let frame_a = buf[..len_a].to_vec();
+            let (_, len_b) = host.read_frame(&mut buf).await.unwrap();
+            let frame_b = buf[..len_b].to_vec();
+            (frame_a, frame_b)
+        });
+
+        let header = |payload_len: usize| FrameHeader {
+            channel: Channel::Experimental { id: 200 },
+            flags: 0,
+            message_type: 1,
+            payload_len: payload_len as u32,
+            pts_us: 0,
+        };
+        // Cancelled mid-flush: the sink stalls on the first write.
+        let cancelled = tokio::time::timeout(
+            std::time::Duration::from_millis(20),
+            tablet.write_frame(header(first.len()), &first),
+        )
+        .await;
+        assert!(cancelled.is_err(), "the stalled sink must hold the write");
+        // Unstall: the next write delivers the first frame's queued
+        // records, then its own.
+        stall.store(false, Ordering::SeqCst);
+        tablet
+            .write_frame(header(second.len()), &second)
+            .await
+            .unwrap();
+        let (frame_a, frame_b) = reader.await.unwrap();
+        assert_eq!(frame_a, first, "the cancelled frame must arrive whole");
+        assert_eq!(frame_b, second, "the next frame must arrive after it");
     }
 
     #[tokio::test]
