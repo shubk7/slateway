@@ -42,6 +42,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let capture_info = capture.start(&CaptureConfig {
         max_fps: 60,
         restore_token: None,
+        with_input: false,
     })?;
     println!("capturing {capture_info:?}");
 
