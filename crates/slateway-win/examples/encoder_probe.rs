@@ -29,7 +29,6 @@ fn main() {
 #[cfg(target_os = "windows")]
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     use std::io::Write;
-    use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
     use slateway_platform::capture::{CaptureConfig, CaptureSource};
