@@ -428,7 +428,14 @@ where
                     match session.write_frame(header, &payload).await {
                         Ok(()) => stats.record_out(payload.len()),
                         Err(err) => {
-                            result = Err(err);
+                            // A write failing because the peer went
+                            // away (Close then drop races the queue
+                            // drain; Windows reports it on the first
+                            // write, Linux on a later one) is a
+                            // disconnect, not a protocol failure.
+                            if !is_disconnect(&err) {
+                                result = Err(err);
+                            }
                             break;
                         }
                     }
