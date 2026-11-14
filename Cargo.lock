@@ -1307,6 +1307,7 @@ version = "0.1.0"
 dependencies = [
  "slateway-ffmpeg",
  "slateway-platform",
+ "slateway-proto",
  "windows",
 ]
 

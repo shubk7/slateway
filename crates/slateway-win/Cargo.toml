@@ -19,6 +19,8 @@ workspace = true
 # Gated so the crate still builds on other OSes.
 [target.'cfg(target_os = "windows")'.dependencies]
 slateway-platform = { version = "0.1.0", path = "../slateway-platform" }
+# Input event types for the injector trait (internal crate).
+slateway-proto = { version = "0.1.0", path = "../slateway-proto" }
 # FFmpeg encoder plumbing (approved as part of the M1 encoder task,
 # ADR-014; WTFPL). Needs the system libavcodec/libavutil/libswscale;
 # see docs/DEVELOPMENT.md "Windows" for the FFMPEG_DIR setup.

@@ -19,8 +19,8 @@ use slateway_proto::input::{EventKind, InputEvent, Tool};
 use windows::Win32::Foundation::POINT;
 use windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
-    MOUSEEVENTF_MOVE, MOUSEEVENTF_VIRTUALDESK, MOUSEINPUT, SendInput,
+    INPUT, INPUT_0, INPUT_MOUSE, MOUSE_EVENT_FLAGS, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN,
+    MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_VIRTUALDESK, MOUSEINPUT, SendInput,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
@@ -102,7 +102,7 @@ impl MouseInjector {
     }
 
     /// Sends one mouse input (move plus optional button flags).
-    fn send(&mut self, x: i32, y: i32, flags: u32) -> Result<(), InputError> {
+    fn send(&mut self, x: i32, y: i32, flags: MOUSE_EVENT_FLAGS) -> Result<(), InputError> {
         let input = INPUT {
             r#type: INPUT_MOUSE,
             Anonymous: INPUT_0 {
