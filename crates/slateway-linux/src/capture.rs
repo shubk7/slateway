@@ -131,7 +131,6 @@ impl Shared {
 struct ListenerData {
     shared: Arc<Shared>,
     format: VideoInfoRaw,
-    negotiated: bool,
     max_fps: u32,
 }
 
@@ -296,7 +295,6 @@ fn run_worker(portal: PortalStream, shared: Arc<Shared>, max_fps: u32) {
     let data = ListenerData {
         shared: Arc::clone(&shared),
         format: VideoInfoRaw::default(),
-        negotiated: false,
         max_fps,
     };
 
@@ -342,10 +340,11 @@ fn run_worker(portal: PortalStream, shared: Arc<Shared>, max_fps: u32) {
                 )));
                 return;
             };
-            if data.negotiated {
-                return;
-            }
-            data.negotiated = true;
+            // Every format event re-publishes: compositor
+            // renegotiations (resolution change, rotation) must update
+            // the geometry, or frames would silently fail the
+            // consistency check and the consumer would only see
+            // timeouts.
             let size = data.format.size();
             let rate = data.format.framerate();
             let info = CaptureInfo {

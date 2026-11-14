@@ -57,7 +57,7 @@ use windows::{
             },
         },
     },
-    core::{Error, HRESULT, IInspectable, Interface, Result as WResult, factory},
+    core::{AgileReference, Error, HRESULT, IInspectable, Interface, Result as WResult, factory},
 };
 
 /// E_FAIL, for the "call succeeded but the out parameter is empty"
@@ -141,14 +141,24 @@ impl Shared {
 
 /// The D3D11 objects the frame handler needs; the context and staging
 /// texture are only touched under one mutex (the WGC event threads
-/// serialize through it).
+/// serialize through it). The WinRT device reaches the handler through
+/// an agile reference: interface wrappers are not `Send`, and an
+/// agile-resolved proxy is the documented way to cross threads with a
+/// WinRT object (and what the official WGC samples do).
 struct Copier {
     device: ID3D11Device,
+    /// WinRT device wrapper for frame-pool `Recreate` on resolution
+    /// change.
+    d3d_device: AgileReference<IDirect3DDevice>,
     state: Mutex<CopierState>,
 }
 
 struct CopierState {
     context: ID3D11DeviceContext,
+    /// Size the frame pool was last created/recreated at. `CopyResource`
+    /// requires identical dimensions, so a copy only happens when the
+    /// frame's `ContentSize` matches this.
+    pool_size: (i32, i32),
     /// Staging texture with its logical size, recreated when the frame
     /// size changes (display mode change).
     staging: Option<(ID3D11Texture2D, i32, i32)>,
@@ -273,8 +283,10 @@ fn setup_capture(
 
     let copier = Arc::new(Copier {
         device,
+        d3d_device: AgileReference::new(&d3d_device)?,
         state: Mutex::new(CopierState {
             context,
+            pool_size: (width as i32, height as i32),
             staging: None,
         }),
     });
@@ -288,6 +300,12 @@ fn setup_capture(
     );
     pool.FrameArrived(&handler)?;
     let session = pool.CreateCaptureSession(&item)?;
+    // The cursor and the yellow capture border would be burned into
+    // the frames; a mirror must show neither. Borderless capture can
+    // be refused (unpackaged app, older build); keep the border then
+    // rather than failing the capture.
+    let _ = session.SetIsCursorCaptureEnabled(false);
+    let _ = session.SetIsBorderRequired(false);
     session.StartCapture()?;
     Ok((pool, session))
 }
@@ -296,21 +314,66 @@ fn setup_capture(
 /// become a shared failure state; event handlers cannot propagate them
 /// usefully.
 fn handle_frame(pool: &Direct3D11CaptureFramePool, shared: &Arc<Shared>, copier: &Arc<Copier>) {
+    // A frame whose ContentSize differs from the pool size cannot be
+    // copied (CopyResource requires identical dimensions and its
+    // failure mode is silent corruption or device removal, not an
+    // error): recreate the pool at the new size first, as the WGC
+    // samples do. The re-entry guard is the copier mutex, which
+    // serializes all FrameArrived handlers.
     match copy_frame(pool, copier) {
         Ok(Some(frame)) => shared.publish(frame),
         Ok(None) => {}
-        Err(e) => shared.set(WorkerState::Error(format!("frame copy: {e}"))),
+        Err(CopyError::NeedRecreate(size)) => {
+            let recreate = || -> WResult<()> {
+                let d3d_device = copier.d3d_device.resolve()?;
+                pool.Recreate(
+                    &d3d_device,
+                    DirectXPixelFormat::B8G8R8A8UIntNormalized,
+                    2,
+                    size,
+                )
+            };
+            match recreate() {
+                Ok(()) => {
+                    let mut state = copier.state.lock().expect("copier state poisoned");
+                    state.pool_size = (size.Width, size.Height);
+                    // Drop the staging texture; it is rebuilt at the
+                    // new size on the next delivered frame.
+                    state.staging = None;
+                }
+                Err(e) => shared.set(WorkerState::Error(format!("frame pool recreate: {e}"))),
+            }
+        }
+        Err(CopyError::Failed(e)) => shared.set(WorkerState::Error(format!("frame copy: {e}"))),
+    }
+}
+
+enum CopyError {
+    /// The frame's size differs from the pool's; recreate the pool.
+    NeedRecreate(SizeInt32),
+    Failed(Error),
+}
+
+impl From<Error> for CopyError {
+    fn from(e: Error) -> Self {
+        CopyError::Failed(e)
     }
 }
 
 fn copy_frame(
     pool: &Direct3D11CaptureFramePool,
     copier: &Arc<Copier>,
-) -> WResult<Option<CaptureFrame>> {
+) -> Result<Option<CaptureFrame>, CopyError> {
     let frame = pool.TryGetNextFrame()?;
     let content = frame.ContentSize()?;
     if content.Width <= 0 || content.Height <= 0 {
         return Ok(None);
+    }
+    let mut state = copier.state.lock().expect("copier state poisoned");
+    if content.Width != state.pool_size.0 || content.Height != state.pool_size.1 {
+        // Resolution changed. Nothing is copied until the pool has
+        // been recreated at the new size (handle_frame does that next).
+        return Err(CopyError::NeedRecreate(content));
     }
     let width = content.Width as u32;
     let height = content.Height as u32;
@@ -320,7 +383,6 @@ fn copy_frame(
     // for the frame surface; no raw pointer outlives this statement.
     let texture: ID3D11Texture2D = unsafe { access.GetInterface::<ID3D11Texture2D>()? };
 
-    let mut state = copier.state.lock().expect("copier state poisoned");
     // Recreate the staging texture when the frame size changes.
     let staging = match state.staging.take() {
         Some((tex, w, h)) if w == content.Width && h == content.Height => tex,
@@ -347,7 +409,7 @@ fn copy_frame(
                 copier.device.CreateTexture2D(&desc, None, Some(&mut tex))?;
             }
             let Some(tex) = tex else {
-                return Err(Error::from_hresult(E_FAIL));
+                return Err(Error::from_hresult(E_FAIL).into());
             };
             state.staging = Some((tex.clone(), content.Width, content.Height));
             tex
@@ -357,7 +419,8 @@ fn copy_frame(
     let frame_resource: ID3D11Resource = texture.cast()?;
 
     // SAFETY: CopyResource copies between two textures of identical
-    // format and size, both owned by this device, under its context.
+    // dimensions (checked above against pool_size) and format, both
+    // owned by this device, under its context.
     unsafe {
         state
             .context
