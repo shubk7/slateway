@@ -35,6 +35,21 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      # ffmpeg-sys-next (slateway-ffmpeg encoder, ADR-014) links the
+      # system FFmpeg. Pinned gyan.dev shared build: it ships MSVC
+      # import libs (.lib), headers and the runtime DLLs; FFMPEG_DIR
+      # feeds the build script, the bin dir the test binaries.
+      - name: Install FFmpeg dev libraries (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $dest = "$env:GITHUB_WORKSPACE\ffmpeg"
+          $zip = "$env:RUNNER_TEMP\ffmpeg-shared.zip"
+          Invoke-WebRequest -Uri "https://github.com/GyanD/codexffmpeg/releases/download/9.0.2/ffmpeg-9.0.2-full_build-shared.zip" -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath $dest
+          $ffmpeg = "$dest\ffmpeg-9.0.2-full_build-shared"
+          "FFMPEG_DIR=$ffmpeg" >> $env:GITHUB_ENV
+          "$ffmpeg\bin" >> $env:GITHUB_PATH
       # prost-build (slateway-proto) shells out to protoc; runners do
       # not ship it.
       - name: Install protoc and libpipewire

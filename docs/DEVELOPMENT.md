@@ -38,6 +38,13 @@ cargo install cargo-ndk
 
 Rust with the MSVC toolchain, Visual Studio Build Tools (C++ workload), Windows SDK and WDK (driver work), LLVM (for bindgen), `protoc`, FFmpeg development libraries (vcpkg or a shared build), Android platform-tools, Git.
 
+FFmpeg for the encoder (ADR-014): the CI Windows job downloads the
+pinned gyan.dev shared build (`ffmpeg-9.0.2-full_build-shared.zip`)
+and sets `FFMPEG_DIR` plus the `bin` path. Do the same locally:
+download that zip, extract it anywhere, then in PowerShell set
+`FFMPEG_DIR` to the extracted folder and prepend its `bin` directory
+to `PATH` so the test binaries find `avcodec-63.dll` and friends.
+
 Windows-specific notes from the M0 bring-up:
 
 - In PowerShell, quote Gradle's property arguments (the dot gets split
