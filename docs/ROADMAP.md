@@ -28,7 +28,7 @@ Feature IDs are defined in `SCOPE.md`. Latency targets are hypotheses: measure f
 ## M1 Mirror (D1, T1)
 
 - [x] Capture: Linux portal and PipeWire, Windows capture API (both halves hardware-verified by the maintainer on Linux November 13 and Windows November 14, 2026: Windows probe delivered 532 frames in 10 s at 1920×1200 Bgrx, ~53-58 fps with occasional 25-116 ms compositor stalls; frame dump clean of cursor and border; mid-run resolution change to be confirmed on a later Windows session)
-- [ ] Encoders: NVENC, QSV or VAAPI, x264 fallback, low-latency settings
+- [ ] Encoders: NVENC, QSV or VAAPI, x264 fallback, low-latency settings (Linux half hardware-verified by the maintainer on November 14, 2026: h264_nvenc on the RTX 4050, 282 frames in 10 s at 1920×1200 through the portal capture, elementary stream decodes cleanly via ffprobe; encode p50 ~15 ms including the safe-Rust color conversion; Windows half code complete — run `encoder_probe` on the next Windows session with `FFMPEG_DIR` set per DEVELOPMENT.md; QSV/AMF and VAAPI pending per ADR-014)
 - [ ] Video channel, MediaCodec decode, newest-frame rendering
 - [ ] Touch as pointer on both OSes
 - [ ] Reconnect after cable pull

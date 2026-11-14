@@ -19,6 +19,10 @@ workspace = true
 # Gated so the crate still builds on other OSes.
 [target.'cfg(target_os = "windows")'.dependencies]
 slateway-platform = { version = "0.1.0", path = "../slateway-platform" }
+# FFmpeg encoder plumbing (approved as part of the M1 encoder task,
+# ADR-014; WTFPL). Needs the system libavcodec/libavutil/libswscale;
+# see docs/DEVELOPMENT.md "Windows" for the FFMPEG_DIR setup.
+slateway-ffmpeg = { version = "0.1.0", path = "../slateway-ffmpeg" }
 windows = { version = "0.62.2", features = [
     "Foundation",
     "Graphics_Capture",

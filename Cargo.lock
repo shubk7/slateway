@@ -1303,6 +1303,7 @@ dependencies = [
 name = "slateway-win"
 version = "0.1.0"
 dependencies = [
+ "slateway-ffmpeg",
  "slateway-platform",
  "windows",
 ]

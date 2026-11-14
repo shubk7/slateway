@@ -14,4 +14,7 @@
 pub mod capture;
 
 #[cfg(target_os = "windows")]
+pub mod encoder;
+
+#[cfg(target_os = "windows")]
 pub use capture::WgcCapture;
