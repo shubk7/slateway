@@ -16,11 +16,15 @@ workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # ScreenCast portal client (approved as part of the M1 capture task; MIT).
-ashpd = { version = "0.14.0", features = ["screencast"] }
+# The remote_desktop feature adds the RemoteDesktop portal used for
+# pointer injection (approved as part of the M1 input task).
+ashpd = { version = "0.14.0", features = ["screencast", "remote_desktop"] }
 # PipeWire stream consumer for the portal's frames (MIT); re-exports
 # libspa, which we use for buffer and pod types.
 pipewire = "0.10.1"
 slateway-platform = { version = "0.1.0", path = "../slateway-platform" }
+# Input event types for the injector trait (internal crate).
+slateway-proto = { version = "0.1.0", path = "../slateway-proto" }
 # One-shot current-thread runtime for the portal's async calls in start().
 tokio = { version = "1.54.1", features = ["rt"] }
 # FFmpeg encoder plumbing (approved as part of the M1 encoder task,

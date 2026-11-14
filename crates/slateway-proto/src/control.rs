@@ -49,6 +49,11 @@ pub const STREAM_STOP_TYPE: u16 = 10;
 /// Frame header `type` for [`RequestKeyframe`] (tablet to host).
 pub const REQUEST_KEYFRAME_TYPE: u16 = 11;
 
+/// HelloAck capability bit0 (docs/PROTOCOL.md, "Handshake and
+/// versioning"): the host accepts input-channel batches — the
+/// operator passed `--allow-input` (docs/SECURITY.md, "Consent").
+pub const CAPABILITY_INPUT: u32 = 1 << 0;
+
 include!(concat!(env!("OUT_DIR"), "/slateway.control.v0.rs"));
 
 #[cfg(test)]

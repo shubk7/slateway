@@ -18,14 +18,16 @@ use slateway_core::stats::SessionStats;
 use slateway_core::{ClockSync, KEY_LEN, MAX_PLAINTEXT};
 use slateway_proto::Channel;
 use slateway_proto::control::{
-    CLOSE_TYPE, CONFIGURE_TYPE, Close, CloseReason, HELLO_ACK_TYPE, HELLO_TYPE, Hello, HelloAck,
-    PAIR_NEEDED_TYPE, PING_TYPE, PONG_TYPE, PairNeeded, Ping, Pong, REQUEST_KEYFRAME_TYPE,
-    STATS_TYPE, STREAM_START_TYPE, Stats, StreamMode, VideoCodec,
+    CAPABILITY_INPUT, CLOSE_TYPE, CONFIGURE_TYPE, Close, CloseReason, HELLO_ACK_TYPE, HELLO_TYPE,
+    Hello, HelloAck, PAIR_NEEDED_TYPE, PING_TYPE, PONG_TYPE, PairNeeded, Ping, Pong,
+    REQUEST_KEYFRAME_TYPE, STATS_TYPE, STREAM_START_TYPE, Stats, StreamMode, VideoCodec,
 };
 use slateway_proto::frame::FrameHeader;
+use slateway_proto::{INPUT_BATCH_TYPE, InputEvent};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::Mutex;
 
+use crate::input::{InputCounters, InputTx, parse_input_batch, run_input_worker};
 use crate::video::{PumpCounters, VideoSource};
 
 /// Tablet registry shared across sessions: sessions run as tasks (a
@@ -51,6 +53,11 @@ pub struct SessionConfig {
     pub echo: bool,
     /// Clock-sync cadence; one Ping per tick.
     pub tick: Duration,
+    /// Touch-as-pointer consented via `--allow-input` (docs/SECURITY.md,
+    /// "Consent"): announces [`CAPABILITY_INPUT`] in the HelloAck and
+    /// runs the input worker when the platform source yields an
+    /// injector. Injection itself needs the video session's injector.
+    pub input: bool,
 }
 
 impl Default for SessionConfig {
@@ -58,6 +65,7 @@ impl Default for SessionConfig {
         SessionConfig {
             echo: true,
             tick: Duration::from_secs(1),
+            input: false,
         }
     }
 }
@@ -80,6 +88,8 @@ pub struct SessionReport {
     pub stats: SessionStats,
     /// Video pump counters (zero when the session ran without video).
     pub video: PumpCounters,
+    /// Input worker counters (zero when the session ran without input).
+    pub input: InputCounters,
 }
 
 /// Session failures beyond [`SessionError`]: console pairing input and
@@ -247,11 +257,17 @@ where
         "session: hello from '{}' (app '{}', android api {})",
         hello.device_model, hello.app_version, hello.android_api
     );
+    // HelloAck capability bitmask (docs/PROTOCOL.md): bit0 announces
+    // input acceptance — the operator's --allow-input decision, sent
+    // before the capture's consent dialog could delay the ack. When
+    // the injector later fails to come up, tablet input frames are
+    // discarded (counted), never injected.
+    let capabilities: u64 = u64::from(if cfg.input { CAPABILITY_INPUT } else { 0 });
     let ack = HelloAck {
         protocol_major: slateway_proto::control::PROTOCOL_MAJOR,
         protocol_minor: slateway_proto::control::PROTOCOL_MINOR,
         app_version: env!("CARGO_PKG_VERSION").into(),
-        capabilities: 0,
+        capabilities,
     };
     send_control(&mut session, HELLO_ACK_TYPE, &ack.encode_to_vec()).await?;
 
@@ -287,8 +303,16 @@ where
     // first access unit, in order.
     let mut video_join: Option<std::thread::JoinHandle<PumpCounters>> = None;
     let mut keyframe_req: Option<Arc<AtomicBool>> = None;
+    // Signals the input worker to stop (session teardown).
+    let mut input_stop: Option<Arc<AtomicBool>> = None;
+    // Input: the worker owns the injector on a dedicated thread; the
+    // session loop forwards parsed events through this sender. The
+    // receiver moves into the worker below; with no injector it drops
+    // here and session-loop sends fail harmlessly (counted).
+    let (input_tx, input_rx) = std::sync::mpsc::channel::<InputEvent>();
+    let mut input_join: Option<std::thread::JoinHandle<InputCounters>> = None;
     if let Some(mut source) = video {
-        let started = match source.start() {
+        let mut started = match source.start() {
             Ok(started) => started,
             Err(err) => {
                 // The tablet is waiting; give it the orderly shutdown.
@@ -305,6 +329,22 @@ where
             }
         };
         let encoder_config = started.config;
+        // Input injection rides the mirror session (one consent
+        // story): the source's injector runs on the input worker.
+        if let Some(injector) = started.injector.take() {
+            eprintln!("session: input injection enabled");
+            let stop = Arc::new(AtomicBool::new(false));
+            let worker_stop = std::sync::Arc::clone(&stop);
+            input_join = Some(
+                std::thread::Builder::new()
+                    .name("slateway-input".into())
+                    .spawn(move || run_input_worker(injector, input_rx, worker_stop))
+                    .map_err(|e| SessionFailure::Video(format!("input worker: {e}")))?,
+            );
+            input_stop = Some(stop);
+        } else if cfg.input {
+            eprintln!("session: input announced but the platform yielded no injector");
+        }
         let configure = slateway_proto::control::Configure {
             mode: StreamMode::Mirror as i32,
             width_px: encoder_config.width,
@@ -364,9 +404,11 @@ where
         &mut clock,
         &mut report,
         keyframe_req.as_ref(),
+        &input_tx,
     )
     .await;
     report.clock = clock;
+    drop(input_tx);
     if let Err(err) = &loop_result {
         let disconnect = matches!(err, SessionFailure::Session(e) if is_disconnect(e));
         if !disconnect {
@@ -398,6 +440,16 @@ where
     }
     if let Some(join) = video_join {
         report.video = join.join().unwrap_or_default();
+    }
+    // Input teardown: signal the worker (it releases the injector on
+    // the stop flag) and join for exact counters. The stop flag is
+    // belt-and-braces: dropping input_tx above already ends the
+    // worker's recv loop.
+    if let Some(stop) = input_stop {
+        stop.store(true, std::sync::atomic::Ordering::Release);
+    }
+    if let Some(join) = input_join {
+        report.input = join.join().unwrap_or_default();
     }
     report.stats.frames_in += broker_stats.frames_in;
     report.stats.bytes_in += broker_stats.bytes_in;
@@ -475,6 +527,7 @@ async fn run_session_loop(
     clock: &mut ClockSync,
     report: &mut SessionReport,
     keyframe_req: Option<&Arc<AtomicBool>>,
+    input_tx: &InputTx,
 ) -> Result<(), SessionFailure> {
     let mut next_ping = tokio::time::Instant::now() + cfg.tick;
     let mut clock_announced = false;
@@ -491,6 +544,7 @@ async fn run_session_loop(
                         report,
                         keyframe_req,
                         write_tx,
+                        input_tx,
                     )
                     .await;
                     if handled.unhandled {
@@ -542,6 +596,7 @@ async fn handle_frame(
     report: &mut SessionReport,
     keyframe_req: Option<&Arc<AtomicBool>>,
     write_tx: &tokio::sync::mpsc::Sender<WriteCmd>,
+    input_tx: &InputTx,
 ) -> Handled {
     match (header.channel, header.message_type) {
         (Channel::Control, PONG_TYPE) => match Pong::decode(payload) {
@@ -570,6 +625,23 @@ async fn handle_frame(
         (Channel::Control, REQUEST_KEYFRAME_TYPE) => {
             if let Some(req) = keyframe_req {
                 req.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        (Channel::Input, INPUT_BATCH_TYPE) => {
+            // Tablet input (docs/PROTOCOL.md, "Input event"): parse
+            // the batch and hand every event to the injector worker.
+            // Frames without an accepted capability (or a failed
+            // injector) are discarded with the rest of the unknowns.
+            match parse_input_batch(payload) {
+                Ok(events) => {
+                    for event in events {
+                        // A failed send means the worker is gone
+                        // (injection never came up or the session is
+                        // ending); the event is dropped, not fatal.
+                        let _ = input_tx.send(event);
+                    }
+                }
+                Err(err) => eprintln!("session: discarded a malformed input batch ({err})"),
             }
         }
         (Channel::Control, HELLO_TYPE) => {
@@ -716,6 +788,7 @@ mod tests {
             let cfg = SessionConfig {
                 echo: true,
                 tick: Duration::from_millis(20),
+                input: false,
             };
             let confirm = |_code: &str, _device: &str| true;
             serve_once(a, &host_priv, &known, &cfg, &confirm, None).await
@@ -773,6 +846,7 @@ mod tests {
             let cfg = SessionConfig {
                 echo: true,
                 tick: Duration::from_millis(20),
+                input: false,
             };
             let confirm = |_code: &str, _device: &str| true;
             serve_once(a, &host_priv, &known, &cfg, &confirm, None).await
@@ -811,6 +885,7 @@ mod tests {
         let cfg = SessionConfig {
             echo: true,
             tick: Duration::from_millis(20),
+            input: false,
         };
         let client_cfg = ClientConfig {
             frames: 1,
@@ -869,6 +944,7 @@ mod tests {
         let cfg = SessionConfig {
             echo: true,
             tick: Duration::from_millis(10),
+            input: false,
         };
 
         // First run pairs and stores.

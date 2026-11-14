@@ -72,6 +72,17 @@ libx264 fallback). The tablet must be running the app build with the
 video decoder; capture setup on Linux may show a screen-share consent
 dialog once per session.
 
+## Touch as pointer
+
+`--allow-input` (with `--mirror`) lets tablet touches drive the host
+pointer (docs/SECURITY.md, "Consent": the operator's explicit opt-in
+until the per-device consent UI lands). On Linux the capture session
+becomes a RemoteDesktop session with pointer devices, so the same
+consent dialog covers screen sharing and input; coordinates map to
+the streamed monitor automatically. On Windows touches inject as
+absolute mouse events over the primary monitor. Per-device grants
+and a host-side prompt arrive with the M2 UI work.
+
 ## Windows driver testing
 
 Enable test signing only on the dev install, and only after reading `PLATFORMS.md` gotchas. Disabling Secure Boot is a system-wide change.

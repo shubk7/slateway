@@ -34,7 +34,11 @@ windows = { version = "0.62.2", features = [
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
+    # Input injection (M1 touch-as-pointer): SendInput + mouse flags,
+    # GetSystemMetrics for the virtual desktop mapping.
+    "Win32_UI_Input_KeyboardAndMouse",
     "Win32_System_Com",
     "Win32_System_WinRT_Direct3D11",
     "Win32_System_WinRT_Graphics_Capture",
+    "Win32_UI_WindowsAndMessaging",
 ] }

@@ -5,6 +5,7 @@
 //! reverse transports; since protocol minor 2 `--mirror` streams the
 //! primary monitor to the tablet over the video channel.
 
+pub mod input;
 pub mod session;
 pub mod video;
 
@@ -44,6 +45,7 @@ struct Args {
     auto_pair: bool,
     echo: bool,
     mirror: bool,
+    allow_input: bool,
     config_dir: Option<std::path::PathBuf>,
 }
 
@@ -53,6 +55,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut auto_pair = false;
     let mut echo = false;
     let mut mirror = false;
+    let mut allow_input = false;
     let mut config_dir = None;
     let mut iter = args;
     while let Some(arg) = iter.next() {
@@ -67,6 +70,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Args, String> {
             "--auto-pair" => auto_pair = true,
             "--echo" => echo = true,
             "--mirror" => mirror = true,
+            "--allow-input" => allow_input = true,
             "--config-dir" => config_dir = Some(std::path::PathBuf::from(value()?)),
             other => return Err(format!("unknown argument {other}")),
         }
@@ -77,6 +81,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Args, String> {
         auto_pair,
         echo,
         mirror,
+        allow_input,
         config_dir,
     })
 }
@@ -115,18 +120,25 @@ async fn run() -> Result<(), String> {
         eprintln!("slatewayd: known-tablets line {line} skipped: {problem}");
     }
     println!(
-        "slatewayd: host key loaded from {}; transport {:?} on port {}, echo {}, mirror {}, pairing {}",
+        "slatewayd: host key loaded from {}; transport {:?} on port {}, echo {}, mirror {}, input {}, pairing {}",
         dir.display(),
         args.transport,
         args.port,
         if args.echo { "on" } else { "off" },
         if args.mirror { "on" } else { "off" },
+        if args.allow_input { "allowed" } else { "off" },
         if args.auto_pair { "auto" } else { "prompted" },
     );
+    if args.allow_input && !args.mirror {
+        eprintln!(
+            "slatewayd: --allow-input without --mirror has no effect (input rides the mirror session)"
+        );
+    }
 
     let cfg = session::SessionConfig {
         echo: args.echo,
         tick: std::time::Duration::from_secs(1),
+        input: args.allow_input,
     };
 
     // One persistent transport: the listener stays bound across
@@ -183,6 +195,7 @@ async fn run() -> Result<(), String> {
         let host_private = host_key.private;
         let auto_pair = args.auto_pair;
         let mirror = args.mirror;
+        let allow_input = args.allow_input;
         let sessions = Arc::clone(&sessions);
         tokio::spawn(async move {
             // Counts this session for the tunnel-refresh gate; the
@@ -217,9 +230,11 @@ async fn run() -> Result<(), String> {
                 false
             };
             // One fresh platform source per session: a previous
-            // session's capture must not leak into this one.
+            // session's capture must not leak into this one. Input
+            // rides the mirror session (its portal session or capture
+            // target); --allow-input without --mirror is a no-op.
             let video: Option<Box<dyn crate::video::VideoSource>> = if mirror {
-                Some(Box::new(crate::video::PlatformVideoSource))
+                Some(Box::new(crate::video::PlatformVideoSource { allow_input }))
             } else {
                 None
             };

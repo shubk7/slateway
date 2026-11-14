@@ -39,8 +39,9 @@ Cable pull and replug, tablet screen off and on, rotation, host sleep and wake, 
 
 The CI rehearsal covers the wire and encoder logic against
 `mock-tablet`'s video mode with libx264 (slatewayd's
-`mirror_video` integration test). These stay owed on the reference
-tablets (spike S4):
+`mirror_video` integration test, including the scripted touch stroke
+against a recording injector). These stay owed on the reference
+tablets (spike S4, M1 exit criteria):
 
 - Real `--mirror` session over adb reverse: picture visible on the
   tablet, no drift after 10 minutes.
@@ -49,6 +50,11 @@ tablets (spike S4):
   reconfig on resolution change.
 - Rotation and resolution change: new `Configure`, new keyframe,
   decoder keeps up.
+- Touch as pointer (`--allow-input`): taps land where touched on the
+  mirrored monitor (±2 px M1 exit criterion), drags track, multi-
+  finger touch causes no pointer jumps; verify on both tablets, both
+  OSes (Linux needs the portal RemoteDesktop grant in the consent
+  dialog).
 - Record results with date and commit in the results log.
 
 ## Results log

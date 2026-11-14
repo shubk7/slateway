@@ -12,6 +12,10 @@
 /// One input event's size in bytes.
 pub const EVENT_LEN: usize = 16;
 
+/// Message `type` within the input channel: one batch of packed
+/// events (docs/PROTOCOL.md, "Input event").
+pub const INPUT_BATCH_TYPE: u16 = 1;
+
 /// Pen barrel button bits in the `buttons` byte.
 pub mod buttons {
     /// bit0: pen barrel button one.

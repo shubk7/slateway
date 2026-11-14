@@ -37,6 +37,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let info = capture.start(&CaptureConfig {
         max_fps: 60,
         restore_token: None,
+        with_input: false,
     })?;
     println!("capturing {info:?}; dumping frame 3 to /tmp/opencode/capture-probe.ppm");
 

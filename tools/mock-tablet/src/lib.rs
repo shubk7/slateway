@@ -313,6 +313,10 @@ pub struct VideoClientConfig {
     pub request_keyframe_after: Option<usize>,
     /// Health-report cadence; one Stats per tick.
     pub stats_tick: Duration,
+    /// Input events to send as one batch once the first AU arrived
+    /// (M1 touch-as-pointer rehearsal). Sent only after the host
+    /// announced CAPABILITY_INPUT in its HelloAck.
+    pub input_batch: Vec<slateway_proto::input::InputEvent>,
 }
 
 impl Default for VideoClientConfig {
@@ -324,6 +328,7 @@ impl Default for VideoClientConfig {
             frames: 10,
             request_keyframe_after: None,
             stats_tick: Duration::from_millis(100),
+            input_batch: Vec::new(),
         }
     }
 }
@@ -347,6 +352,8 @@ pub struct VideoSummary {
     pub keyframe_after_request: bool,
     /// Largest AU payload seen (decoder budget sanity).
     pub max_payload: usize,
+    /// Input events sent in the scripted batch (0 when none).
+    pub inputs_sent: usize,
     /// Frame counters for the report.
     pub stats: SessionStats,
 }
@@ -390,13 +397,10 @@ where
         capabilities: 0,
     };
     send_control(&mut session, HELLO_TYPE, &hello.encode_to_vec()).await?;
-    loop {
+    let host_capabilities: u64 = loop {
         let (header, bytes) = read_control(&mut session).await?;
         match header.message_type {
-            HELLO_ACK_TYPE => {
-                HelloAck::decode(bytes.as_slice())?;
-                break;
-            }
+            HELLO_ACK_TYPE => break HelloAck::decode(bytes.as_slice())?.capabilities,
             PAIR_NEEDED_TYPE => {
                 send_control(&mut session, HELLO_TYPE, &hello.encode_to_vec()).await?
             }
@@ -406,7 +410,7 @@ where
                 ));
             }
         }
-    }
+    };
 
     // Expect Configure then StreamStart (auto-stream after handshake,
     // the user-approved M1 flow); anything else is a violation.
@@ -481,6 +485,19 @@ where
                 }
                 if summary.frames == 0 {
                     summary.first_frame_was_keyframe = keyframe;
+                    // Scripted input: one batch once the stream is
+                    // visibly running and the host accepted input.
+                    if !cfg.input_batch.is_empty() {
+                        if host_capabilities & u64::from(slateway_proto::control::CAPABILITY_INPUT)
+                            == 0
+                        {
+                            return Err(ClientError::Protocol(
+                                "host did not announce the input capability",
+                            ));
+                        }
+                        send_input_batch(&mut session, &cfg.input_batch).await?;
+                        summary.inputs_sent = cfg.input_batch.len();
+                    }
                 }
                 if keyframe {
                     summary.keyframes += 1;
@@ -531,4 +548,28 @@ async fn read_any<S: AsyncRead + AsyncWrite + Unpin>(
 ) -> Result<(FrameHeader, Vec<u8>), ClientError> {
     let (header, len) = session.read_frame(scratch).await?;
     Ok((header, scratch[..len].to_vec()))
+}
+
+/// Sends one input-channel batch: events packed back to back
+/// (docs/PROTOCOL.md, "Input event").
+async fn send_input_batch<S: AsyncRead + AsyncWrite + Unpin>(
+    session: &mut SecureSession<S>,
+    events: &[slateway_proto::input::InputEvent],
+) -> Result<(), ClientError> {
+    let mut payload = vec![0u8; slateway_proto::input::batch_len(events.len())];
+    slateway_proto::input::encode_batch_into(events, &mut payload)
+        .map_err(|_| ClientError::Protocol("input batch did not fit its buffer"))?;
+    session
+        .write_frame(
+            FrameHeader {
+                channel: Channel::Input,
+                flags: 0,
+                message_type: slateway_proto::input::INPUT_BATCH_TYPE,
+                payload_len: payload.len() as u32,
+                pts_us: 0,
+            },
+            &payload,
+        )
+        .await?;
+    Ok(())
 }

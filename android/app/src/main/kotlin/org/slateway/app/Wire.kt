@@ -39,6 +39,13 @@ object Protocol {
      * access units, host to tablet. */
     const val CHANNEL_VIDEO: Int = 1
 
+    /** Input channel: packed 16-byte input events in batches,
+     * tablet to host (docs/PROTOCOL.md, "Input event"). */
+    const val CHANNEL_INPUT: Int = 2
+
+    /** Message type within the input channel: one batch. */
+    const val INPUT_BATCH_TYPE: Int = 1
+
     const val HELLO_TYPE: Int = 1
     const val HELLO_ACK_TYPE: Int = 2
     const val CLOSE_TYPE: Int = 3
@@ -63,6 +70,10 @@ object Protocol {
 
     /** Header flag bit0 on a video frame: the AU is an IDR keyframe. */
     const val VIDEO_KEYFRAME_FLAG: Int = 0b01
+
+    /** HelloAck capability bit0 (docs/PROTOCOL.md): the host accepts
+     * input-channel batches (operator's --allow-input). */
+    const val CAPABILITY_INPUT: Long = 1L
 }
 
 /**

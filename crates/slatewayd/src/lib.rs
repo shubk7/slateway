@@ -2,5 +2,6 @@
 
 //! Slateway host daemon: capture, encode and inject on the PC side.
 
+pub mod input;
 pub mod session;
 pub mod video;

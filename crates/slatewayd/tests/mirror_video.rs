@@ -6,7 +6,7 @@
 //! Asserts the wire order (Configure, StreamStart, keyframe-first
 //! AUs), pts monotonicity, and the RequestKeyframe → keyframe path.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use slateway_core::KEY_LEN;
@@ -17,6 +17,8 @@ use slateway_platform::capture::{
     monotonic_us,
 };
 use slateway_platform::encoder::EncoderConfig;
+use slateway_platform::input::{InputError, PointerInjector};
+use slateway_proto::input::{EventKind, InputEvent, Tool};
 use slatewayd::session::{SessionConfig, SharedTablets, serve_once};
 use slatewayd::video::{EncoderOpener, StartedVideo, VideoSource};
 use tempfile::TempDir;
@@ -70,10 +72,38 @@ impl CaptureSource for SyntheticCapture {
     fn stop(&mut self) {}
 }
 
+/// A recording injector: the test's stand-in for the platform
+/// injectors (AGENTS.md rule 2 keeps real OS injection out of CI).
+/// Collects every injected event so assertions run on the
+/// post-policy stream. The log is shared with the test through an
+/// `Arc` because the session moves the injector into its worker.
+#[derive(Clone, Default)]
+struct RecorderInjector {
+    events: Arc<StdMutex<Vec<InputEvent>>>,
+}
+
+impl RecorderInjector {
+    fn injected(&self) -> Vec<InputEvent> {
+        self.events.lock().expect("recorder poisoned").clone()
+    }
+}
+
+impl PointerInjector for RecorderInjector {
+    fn inject(&mut self, event: &InputEvent) -> Result<(), InputError> {
+        self.events.lock().expect("recorder poisoned").push(*event);
+        Ok(())
+    }
+
+    fn release(&mut self) {}
+}
+
 /// The test video source: synthetic capture, libx264 directly (no
 /// platform candidate lists; AGENTS.md rule 2 keeps those in the
-/// platform crates).
-struct TestVideoSource;
+/// platform crates), and the recording injector standing in for the
+/// platform pointer path.
+struct TestVideoSource {
+    recorder: RecorderInjector,
+}
 
 impl VideoSource for TestVideoSource {
     fn start(&mut self) -> Result<StartedVideo, String> {
@@ -92,6 +122,7 @@ impl VideoSource for TestVideoSource {
                 bitrate_kbps: 0,
             },
             open_encoder: open,
+            injector: Some(Box::new(self.recorder.clone())),
         })
     }
 }
@@ -115,12 +146,83 @@ fn host_key() -> [u8; KEY_LEN] {
 async fn mirror_session_streams_decodable_keyframes() {
     let (_dir, known) = known_registry();
     let host_priv = host_key();
+    let recorder = RecorderInjector::default();
+
+    // The scripted touch stroke: down, a move run, up (finger,
+    // contact 0, normalized coordinates across the streamed display).
+    let stroke = vec![
+        InputEvent {
+            kind: EventKind::Down,
+            tool: Tool::Finger,
+            buttons: 0,
+            pointer_id: 0,
+            x: 1000,
+            y: 2000,
+            pressure: 0,
+            tilt_x: 0,
+            tilt_y: 0,
+            dt_us: 0,
+        },
+        InputEvent {
+            kind: EventKind::Move,
+            tool: Tool::Finger,
+            buttons: 0,
+            pointer_id: 0,
+            x: 2000,
+            y: 3000,
+            pressure: 0,
+            tilt_x: 0,
+            tilt_y: 0,
+            dt_us: 8000,
+        },
+        InputEvent {
+            kind: EventKind::Down,
+            tool: Tool::Finger,
+            buttons: 0,
+            pointer_id: 1,
+            x: 500,
+            y: 500,
+            pressure: 0,
+            tilt_x: 0,
+            tilt_y: 0,
+            dt_us: 8000,
+        },
+        InputEvent {
+            kind: EventKind::Up,
+            tool: Tool::Finger,
+            buttons: 0,
+            pointer_id: 0,
+            x: 2000,
+            y: 3000,
+            pressure: 0,
+            tilt_x: 0,
+            tilt_y: 0,
+            dt_us: 16000,
+        },
+        // The second contact lifts after the primary (two-finger
+        // touch): the M1 policy ignored it entirely, so its up is
+        // ignored too.
+        InputEvent {
+            kind: EventKind::Up,
+            tool: Tool::Finger,
+            buttons: 0,
+            pointer_id: 1,
+            x: 500,
+            y: 500,
+            pressure: 0,
+            tilt_x: 0,
+            tilt_y: 0,
+            dt_us: 24000,
+        },
+    ];
 
     let (a, b) = tokio::io::duplex(64 * 1024);
+    let recorder_for_server = recorder.clone();
     let server = tokio::spawn(async move {
         let cfg = SessionConfig {
             echo: false,
             tick: Duration::from_millis(20),
+            input: true,
         };
         let confirm = |_code: &str, _device: &str| true;
         serve_once(
@@ -129,7 +231,9 @@ async fn mirror_session_streams_decodable_keyframes() {
             &known,
             &cfg,
             &confirm,
-            Some(Box::new(TestVideoSource)),
+            Some(Box::new(TestVideoSource {
+                recorder: recorder_for_server,
+            })),
         )
         .await
     });
@@ -138,6 +242,7 @@ async fn mirror_session_streams_decodable_keyframes() {
         frames: 12,
         request_keyframe_after: Some(5),
         stats_tick: Duration::from_millis(50),
+        input_batch: stroke,
         ..Default::default()
     };
     let client = mock_tablet::run_video_client(&client_cfg, b);
@@ -177,6 +282,51 @@ async fn mirror_session_streams_decodable_keyframes() {
         report
             .video
             .encode_errors
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
+
+    // Touch-as-pointer: the scripted stroke reached the injector as
+    // down → move → up for the primary contact; the second contact
+    // (pointer_id 1) was ignored by the M1 policy.
+    assert_eq!(summary.inputs_sent, 5, "the scripted batch was sent");
+    let injected = recorder.injected();
+    assert_eq!(
+        injected.len(),
+        3,
+        "down, move and up inject; the second contact is ignored: {injected:?}"
+    );
+    assert_eq!(injected[0].kind, EventKind::Down);
+    assert_eq!(injected[0].x, 1000);
+    assert_eq!(injected[1].kind, EventKind::Move);
+    assert_eq!(injected[1].pointer_id, 0);
+    assert_eq!(injected[2].kind, EventKind::Up);
+    // Worker counters agree with what the injector saw.
+    assert_eq!(
+        report
+            .input
+            .events_in
+            .load(std::sync::atomic::Ordering::Relaxed),
+        5
+    );
+    assert_eq!(
+        report
+            .input
+            .events_injected
+            .load(std::sync::atomic::Ordering::Relaxed),
+        3
+    );
+    assert_eq!(
+        report
+            .input
+            .events_coalesced
+            .load(std::sync::atomic::Ordering::Relaxed),
+        2
+    );
+    assert_eq!(
+        report
+            .input
+            .injection_errors
             .load(std::sync::atomic::Ordering::Relaxed),
         0
     );

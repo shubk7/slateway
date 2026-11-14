@@ -16,5 +16,15 @@ pub mod capture;
 #[cfg(target_os = "windows")]
 pub mod encoder;
 
+// Input injection also calls unsafe user32 APIs (SendInput, monitor
+// geometry); same gate and SAFETY discipline as capture.rs. The
+// maintainer approved SendInput for M1 touch-as-pointer.
+#[cfg(target_os = "windows")]
+#[allow(unsafe_code)]
+pub mod input;
+
 #[cfg(target_os = "windows")]
 pub use capture::WgcCapture;
+
+#[cfg(target_os = "windows")]
+pub use input::MouseInjector;

@@ -14,5 +14,9 @@ workspace = true
 
 [dependencies]
 async-trait = "0.1.92"
+# The injector trait takes the wire event type (docs/PROTOCOL.md
+# "Input event") so the daemon passes decoded events through without
+# a duplicate struct. Internal crate, no new external dependency.
+slateway-proto = { path = "../slateway-proto", version = "0.1.0" }
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["net", "process", "io-util", "rt", "macros", "time"] }

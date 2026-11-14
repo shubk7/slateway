@@ -226,16 +226,29 @@ class ConnectionService : Service() {
                     )
                     Log.i(tag, "handshake complete with host app '${ack.appVersion}'")
 
-                    // M1: the session answers clock pings and renders
-                    // the host's mirror stream (docs/PROTOCOL.md,
-                    // "Video session flow"). The decoder is created
-                    // before the loop so a Configure arriving right
-                    // after HelloAck finds it.
+                    // M1: the session answers clock pings, renders the
+                    // host's mirror stream (docs/PROTOCOL.md, "Video
+                    // session flow") and — when the host announced
+                    // input acceptance (the operator's --allow-input)
+                    // — sends touch events as pointer input.
                     val decoder = VideoDecoder()
                     videoDecoder = decoder
                     val surface = videoSurface
                     if (surface != null) {
                         decoder.attachSurface(surface)
+                    }
+                    // One write lock for the stateful Noise session:
+                    // clock Pongs (this thread) and touch batches
+                    // (the input sender thread) serialize on it.
+                    val writeLock = Any()
+                    val dataOutput = java.io.DataOutputStream(output)
+                    var sender: InputSender? = null
+                    if (ack.capabilities and Protocol.CAPABILITY_INPUT != 0L) {
+                        val newSender = InputSender(channel, dataOutput, writeLock)
+                        sender = newSender
+                        inputSender = newSender
+                        newSender.start()
+                        Log.i(tag, "input: touch-as-pointer enabled (host accepted input)")
                     }
                     var pongs = 0
                     var frames = 0L
@@ -263,11 +276,13 @@ class ConnectionService : Service() {
                                             null
                                         }
                                         if (pong != null) {
-                                            channel.writeFrame(
-                                                output,
-                                                FrameHeader(Protocol.CHANNEL_CONTROL, 0, Protocol.PONG_TYPE, pong.size, 0),
-                                                pong,
-                                            )
+                                            synchronized(writeLock) {
+                                                channel.writeFrame(
+                                                    output,
+                                                    FrameHeader(Protocol.CHANNEL_CONTROL, 0, Protocol.PONG_TYPE, pong.size, 0),
+                                                    pong,
+                                                )
+                                            }
                                             pongs++
                                             if (pongs == 1) Log.i(tag, "session: first clock ping answered")
                                         }
@@ -320,6 +335,10 @@ class ConnectionService : Service() {
                             }
                         }
                     } finally {
+                        // Stop the touch sender before the channel
+                        // dies so no batch races the close.
+                        sender?.stop()
+                        inputSender = null
                         decoder.release()
                         videoDecoder = null
                     }
@@ -424,6 +443,23 @@ class ConnectionService : Service() {
          * it the display surface. */
         @Volatile
         internal var videoDecoder: VideoDecoder? = null
+
+        /** The active session's touch sender, if the host accepted
+         * input; the activity's SurfaceView feeds it. */
+        @Volatile
+        private var inputSender: InputSender? = null
+
+        /**
+         * Extracts a video-surface touch into input samples and queues
+         * them for the host (docs/PROTOCOL.md, "Input event"). Returns
+         * true when consumed — the listener consumes only while a
+         * session with input acceptance is live, so taps otherwise
+         * behave normally (e.g. focus the port field).
+         */
+        fun onVideoTouch(view: android.view.View, event: android.view.MotionEvent): Boolean {
+            val sender = inputSender ?: return false
+            return sender.onTouch(view, event)
+        }
 
         /** The SurfaceHolder the activity registered, if any; null
          * while no surface exists. */

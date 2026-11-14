@@ -20,6 +20,7 @@ use slateway_platform::capture::{CaptureConfig, CaptureSource};
 use slateway_platform::encoder::{
     EncodedPacket, Encoder, EncoderConfig, EncoderError, EncoderInfo,
 };
+use slateway_platform::input::PointerInjector;
 use slateway_proto::{Channel, FrameHeader, VIDEO_AU_TYPE, VIDEO_KEYFRAME_FLAG};
 use tokio::sync::mpsc;
 
@@ -34,11 +35,15 @@ pub type EncoderOpener =
 
 /// What one started video source hands the pump: the running capture,
 /// the stream geometry, and this platform's encoder opener (Linux and
-/// Windows pick different candidate lists, AGENTS.md rule 2).
+/// Windows pick different candidate lists, AGENTS.md rule 2). With
+/// input enabled the source also yields the platform's pointer
+/// injector (Linux: the portal session shared with the capture;
+/// Windows: SendInput over the captured monitor).
 pub struct StartedVideo {
     pub source: Box<dyn CaptureSource>,
     pub config: EncoderConfig,
     pub open_encoder: Box<EncoderOpener>,
+    pub injector: Option<Box<dyn PointerInjector>>,
 }
 
 /// Produces the platform video source for a session. `start` blocks
@@ -151,13 +156,17 @@ fn send_packet(
 
 /// The platform source behind `--mirror` (slatewayd runs on a real
 /// desktop; tests inject their own [`VideoSource`]).
-pub struct PlatformVideoSource;
+pub struct PlatformVideoSource {
+    /// Touch-as-pointer requested (the `--allow-input` flag).
+    pub allow_input: bool,
+}
 
 impl VideoSource for PlatformVideoSource {
     fn start(&mut self) -> Result<StartedVideo, String> {
         start_platform(&CaptureConfig {
             max_fps: 60,
             restore_token: None,
+            with_input: self.allow_input,
         })
     }
 }
@@ -165,8 +174,25 @@ impl VideoSource for PlatformVideoSource {
 #[cfg(target_os = "linux")]
 fn start_platform(config: &CaptureConfig) -> Result<StartedVideo, String> {
     use slateway_linux::PortalCapture;
-    let mut source = Box::new(PortalCapture::default()) as Box<dyn CaptureSource>;
-    let info = source.start(config).map_err(|e| e.to_string())?;
+    let mut capture = PortalCapture::default();
+    let info = capture.start(config).map_err(|e| e.to_string())?;
+    // With input requested, the capture's portal session carries the
+    // pointer devices; take the handle before the capture moves into
+    // the pump.
+    let injector: Option<Box<dyn PointerInjector>> = match capture.take_input() {
+        Some(handle) => {
+            eprintln!("video: pointer injection granted on the portal session");
+            match slateway_linux::input::PortalPointer::new(handle) {
+                Ok(pointer) => Some(Box::new(pointer)),
+                Err(err) => {
+                    eprintln!("video: pointer injector setup failed ({err}); input stays off");
+                    None
+                }
+            }
+        }
+        None => None,
+    };
+    let source = Box::new(capture) as Box<dyn CaptureSource>;
     Ok(StartedVideo {
         source,
         config: EncoderConfig {
@@ -176,6 +202,7 @@ fn start_platform(config: &CaptureConfig) -> Result<StartedVideo, String> {
             bitrate_kbps: 0,
         },
         open_encoder: Box::new(slateway_linux::encoder::start),
+        injector,
     })
 }
 
@@ -184,6 +211,19 @@ fn start_platform(config: &CaptureConfig) -> Result<StartedVideo, String> {
     use slateway_win::WgcCapture;
     let mut source = Box::new(WgcCapture::default()) as Box<dyn CaptureSource>;
     let info = source.start(config).map_err(|e| e.to_string())?;
+    // SendInput works without a capture session; input rides the
+    // mirror session for M1's consent story (one operator flag).
+    let injector: Option<Box<dyn PointerInjector>> = if config.with_input {
+        match slateway_win::input::MouseInjector::new() {
+            Ok(mouse) => Some(Box::new(mouse)),
+            Err(err) => {
+                eprintln!("video: pointer injector setup failed ({err}); input stays off");
+                None
+            }
+        }
+    } else {
+        None
+    };
     Ok(StartedVideo {
         source,
         config: EncoderConfig {
@@ -193,6 +233,7 @@ fn start_platform(config: &CaptureConfig) -> Result<StartedVideo, String> {
             bitrate_kbps: 0,
         },
         open_encoder: Box::new(slateway_win::encoder::start),
+        injector,
     })
 }
 

@@ -21,11 +21,11 @@ pub mod video;
 
 pub use channel::{Channel, UnknownChannelError};
 pub use control::{
-    CLOSE_TYPE, CONFIGURE_TYPE, Close, CloseReason, Configure, DecodeLimits, HELLO_ACK_TYPE,
-    HELLO_TYPE, Hello, HelloAck, PAIR_NEEDED_TYPE, PING_TYPE, PONG_TYPE, PairNeeded, Ping, Pong,
-    REQUEST_KEYFRAME_TYPE, STATS_TYPE, STREAM_START_TYPE, STREAM_STOP_TYPE, Screen, Stats,
-    StreamMode, StreamStart, StreamStop, VideoCodec,
+    CAPABILITY_INPUT, CLOSE_TYPE, CONFIGURE_TYPE, Close, CloseReason, Configure, DecodeLimits,
+    HELLO_ACK_TYPE, HELLO_TYPE, Hello, HelloAck, PAIR_NEEDED_TYPE, PING_TYPE, PONG_TYPE,
+    PairNeeded, Ping, Pong, REQUEST_KEYFRAME_TYPE, STATS_TYPE, STREAM_START_TYPE, STREAM_STOP_TYPE,
+    Screen, Stats, StreamMode, StreamStart, StreamStop, VideoCodec,
 };
 pub use frame::{FrameError, FrameHeader, HEADER_LEN, MAX_PAYLOAD_LEN};
-pub use input::{BatchEncodeError, EVENT_LEN, InputError, InputEvent};
+pub use input::{BatchEncodeError, EVENT_LEN, INPUT_BATCH_TYPE, InputError, InputEvent};
 pub use video::{VIDEO_AU_TYPE, VIDEO_KEYFRAME_FLAG};

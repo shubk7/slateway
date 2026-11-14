@@ -93,6 +93,12 @@ pub struct CaptureConfig {
     /// screencast lets the compositor skip the consent dialog. Stored
     /// and refreshed by the daemon config, not by the source.
     pub restore_token: Option<String>,
+    /// Request pointer-injection devices on the same portal session
+    /// (M1 touch-as-pointer): one consent dialog then covers capture
+    /// and input, and the compositor maps injected coordinates to the
+    /// streamed monitor. `PortalCapture::start` exposes the resulting
+    /// session for `PortalPointer`.
+    pub with_input: bool,
 }
 
 #[derive(Debug, Error)]

@@ -211,6 +211,55 @@ class WireTest {
         assertEquals(0b01, Protocol.VIDEO_KEYFRAME_FLAG)
     }
 
+    @Test
+    fun inputConstantsMatchTheProtocolDoc() {
+        // Touch-as-pointer (M1): channel 2 carries batches of packed
+        // 16-byte events; HelloAck bit0 announces input acceptance.
+        // Cross-checked with crates/slateway-proto src/{input,control}.rs.
+        assertEquals(2, Protocol.CHANNEL_INPUT)
+        assertEquals(1, Protocol.INPUT_BATCH_TYPE)
+        assertEquals(1L, Protocol.CAPABILITY_INPUT)
+        assertEquals(16, InputSender.EVENT_LEN_BYTES)
+        assertEquals(0, InputSender.KIND_DOWN)
+        assertEquals(1, InputSender.KIND_MOVE)
+        assertEquals(2, InputSender.KIND_UP)
+    }
+
+    @Test
+    fun inputSampleEncodingMatchesTheRustGoldenLayout() {
+        // Byte-for-byte the Rust golden_layout test
+        // (crates/slateway-proto src/input.rs): kind, tool, buttons,
+        // pointer id, x, y, pressure, tilt, dt — little-endian.
+        val out = ByteArray(InputSender.EVENT_LEN_BYTES)
+        InputSender.encodeSample(
+            InputSender.Sample(
+                kind = InputSender.KIND_DOWN,
+                tool = InputSender.TOOL_FINGER,
+                pointerId = 3,
+                x = 0x1234,
+                y = 0x5678,
+                pressure = 0,
+                ptsUs = 0,
+            ),
+            out,
+            0,
+        )
+        assertArrayEquals(
+            byteArrayOf(
+                0x00, // kind: down
+                0x00, // tool: finger
+                0x00, // buttons
+                0x03, // pointer id
+                0x34, 0x12, // x
+                0x78, 0x56, // y
+                0x00, 0x00, // pressure: fingers carry none
+                0x00, 0x00, // tilt_x, tilt_y (M3)
+                0x00, 0x00, 0x00, 0x00, // dt_us
+            ),
+            out,
+        )
+    }
+
     private fun assertProtocolError(block: () -> Unit) {
         try {
             block()

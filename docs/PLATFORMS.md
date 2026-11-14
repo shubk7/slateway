@@ -9,7 +9,7 @@ Starting points, not guarantees. Verify each API against current documentation b
 | Virtual display | Indirect Display Driver (IddCx, UMDF) built from an existing open-source IDD with a compatible license (spike S2) |
 | Capture | Windows.Graphics.Capture into a D3D11 staging copy (`slateway-win::WgcCapture`); evaluate taking frames from the IDD swapchain |
 | Encode | `h264_nvenc` first, `libx264` ultrafast zerolatency as fallback for M1 (ADR-014); `h264_qsv` and `h264_amf` candidates pending input-format verification (DECISIONS pending) |
-| Input | Synthetic pointer injection (`CreateSyntheticPointerDevice`, `InjectSyntheticPointerInput`) with touch and pen types, mapped to the target monitor rectangle |
+| Input | M1 touch-as-pointer: `SendInput` absolute mouse over the primary monitor (user-approved 2026-11; visible cursor, no elevation). M3 pen: synthetic pointer injection (`CreateSyntheticPointerDevice`, `InjectSyntheticPointerInput`, PT_PEN) for pressure and tilt |
 | Virtual camera | Media Foundation virtual camera API, Windows 11 only. Windows 10 unsupported initially |
 | Virtual mic | Undecided (spike S5). Needs a virtual audio driver or an existing signed one |
 | Audio capture | WASAPI loopback |

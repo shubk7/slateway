@@ -42,6 +42,11 @@ class MainActivity : Activity() {
         status = findViewById(R.id.status)
         status.text = ConnectionService.statusText
         videoSurface = findViewById(R.id.video)
+        // Touch on the mirror surface drives the host pointer while a
+        // session with input acceptance is live (M1 touch-as-pointer).
+        videoSurface.setOnTouchListener { view, event ->
+            ConnectionService.onVideoTouch(view, event)
+        }
         videoSurface.holder.addCallback(object : android.view.SurfaceHolder.Callback {
             override fun surfaceCreated(holder: android.view.SurfaceHolder) {
                 ConnectionService.videoSurfaceHolder = holder

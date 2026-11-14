@@ -138,6 +138,7 @@ struct ListenerData {
 pub struct PortalCapture {
     shared: Option<Arc<Shared>>,
     worker: Option<JoinHandle<()>>,
+    input: Option<crate::input::PortalHandle>,
 }
 
 /// The portal session result: which PipeWire node to consume and the
@@ -149,6 +150,112 @@ struct PortalStream {
     width: u32,
     height: u32,
     fd: OwnedFd,
+}
+
+/// The portal session result: which PipeWire node to consume and the
+/// remote that carries it, plus the input handle when pointer devices
+/// were requested on the same session.
+struct PortalResult {
+    stream: PortalStream,
+    input: Option<crate::input::PortalHandle>,
+}
+
+/// Runs the portal dance. With `with_input`, the session is created
+/// by the RemoteDesktop portal and screencast sources are selected on
+/// it (one consent dialog covers capture and input); otherwise this
+/// is the plain screencast session.
+async fn request_portal(config: &CaptureConfig) -> Result<PortalResult, CaptureError> {
+    if config.with_input {
+        request_remote_desktop(config).await
+    } else {
+        let stream = request_portal_stream(config).await?;
+        Ok(PortalResult {
+            stream,
+            input: None,
+        })
+    }
+}
+
+async fn request_remote_desktop(config: &CaptureConfig) -> Result<PortalResult, CaptureError> {
+    use ashpd::desktop::{
+        remote_desktop::{DeviceType, RemoteDesktop, SelectDevicesOptions},
+        screencast::SelectSourcesOptions,
+    };
+    let desktop = RemoteDesktop::new()
+        .await
+        .map_err(|e| CaptureError::Setup(format!("remote desktop portal: {e}")))?;
+    let cast = Screencast::new()
+        .await
+        .map_err(|e| CaptureError::Setup(format!("screencast portal: {e}")))?;
+    let session = desktop
+        .create_session(Default::default())
+        .await
+        .map_err(|e| CaptureError::Setup(format!("create session: {e}")))?;
+    desktop
+        .select_devices(
+            &session,
+            SelectDevicesOptions::default()
+                .set_devices(DeviceType::POINTER)
+                .set_persist_mode(PersistMode::DoNot),
+        )
+        .await
+        .map_err(|e| CaptureError::Setup(format!("select devices: {e}")))?;
+    cast.select_sources(
+        &session,
+        SelectSourcesOptions::default()
+            .set_cursor_mode(CursorMode::EMBEDDED)
+            .set_sources(SourceType::MONITOR)
+            .set_multiple(false)
+            .set_restore_token(config.restore_token.as_deref())
+            .set_persist_mode(PersistMode::DoNot),
+    )
+    .await
+    .map_err(|e| CaptureError::Setup(format!("select sources: {e}")))?;
+    let response = desktop
+        .start(&session, None, Default::default())
+        .await
+        .map_err(|e| CaptureError::Setup(format!("start (consent refused?): {e}")))?
+        .response()
+        .map_err(|e| CaptureError::Setup(format!("start response: {e}")))?;
+    let stream = response
+        .streams()
+        .first()
+        .ok_or_else(|| CaptureError::Setup("no monitor selected".into()))?
+        .to_owned();
+    let devices = response.devices();
+    if !devices.contains(DeviceType::POINTER) {
+        return Err(CaptureError::Setup(
+            "the operator did not grant pointer control".into(),
+        ));
+    }
+    let fd = cast
+        .open_pipe_wire_remote(&session, Default::default())
+        .await
+        .map_err(|e| CaptureError::Setup(format!("open pipewire remote: {e}")))?;
+    let (width, height) = stream.size().unwrap_or((0, 0));
+    let node_id = stream.pipe_wire_node_id();
+    let input = crate::input::PortalHandle {
+        proxy: desktop,
+        session,
+        stream: node_id,
+        target: slateway_platform::input::PointerTarget {
+            // The portal maps coordinates itself via the session; the
+            // target records the streamed geometry for diagnostics.
+            origin_x: 0,
+            origin_y: 0,
+            width: width.max(0) as u32,
+            height: height.max(0) as u32,
+        },
+    };
+    Ok(PortalResult {
+        stream: PortalStream {
+            node_id,
+            width: width.max(0) as u32,
+            height: height.max(0) as u32,
+            fd,
+        },
+        input: Some(input),
+    })
 }
 
 async fn request_portal_stream(config: &CaptureConfig) -> Result<PortalStream, CaptureError> {
@@ -434,6 +541,16 @@ fn run_worker(portal: PortalStream, shared: Arc<Shared>, max_fps: u32) {
     // Drop order: stream, core, context, main loop.
 }
 
+impl PortalCapture {
+    /// Takes the portal input handle after a successful
+    /// `with_input` start: clones of the portal proxy and session,
+    /// ready for [`crate::input::PortalPointer`]. Returns `None` when
+    /// the session ran without input or it was already taken.
+    pub fn take_input(&mut self) -> Option<crate::input::PortalHandle> {
+        self.input.take()
+    }
+}
+
 impl CaptureSource for PortalCapture {
     fn start(&mut self, config: &CaptureConfig) -> Result<CaptureInfo, CaptureError> {
         if self.shared.is_some() {
@@ -442,11 +559,13 @@ impl CaptureSource for PortalCapture {
         // `tokio::runtime::Builder::block_on` panics if called from
         // inside a runtime; the trait contract keeps this off the async
         // threads (ARCHITECTURE.md: dedicated OS thread for capture).
-        let portal = tokio::runtime::Builder::new_current_thread()
+        let result = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|e| CaptureError::Unsupported(format!("no tokio runtime: {e}")))?
-            .block_on(request_portal_stream(config))?;
+            .block_on(request_portal(config))?;
+        let portal = result.stream;
+        self.input = result.input;
 
         let shared = Arc::new(Shared::new());
         let worker_shared = Arc::clone(&shared);

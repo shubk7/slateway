@@ -13,12 +13,14 @@
 
 pub mod capture;
 pub mod encoder;
+pub mod input;
 pub mod transport;
 
 pub use capture::{
     CaptureConfig, CaptureError, CaptureFrame, CaptureInfo, CaptureSource, FrameFormat,
 };
 pub use encoder::{EncodedPacket, Encoder, EncoderConfig, EncoderError, EncoderInfo};
+pub use input::{InputError, PointerInjector, PointerTarget};
 pub use transport::{
     AdbReverseTransport, AsyncReadWrite, BoxStream, DEFAULT_PORT, LoopbackTransport, Transport,
     TransportError,

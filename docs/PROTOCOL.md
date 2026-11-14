@@ -126,6 +126,25 @@ host time on arrival. pts is relative to session start.
 
 The tablet handles its own rotation; coordinates are always in the stream's frame.
 
+## Input session flow (M1, touch as pointer)
+
+1. The tablet sends input batches on channel 2 (type 1) only after
+   the HelloAck announced capability bit0 — without it the host is
+   discarding input, so the tablet keeps its touches local.
+2. The tablet extracts every MotionEvent into packed events (kind,
+   tool, pointer id, 0..65535 coordinates across the streamed view,
+   pressure for pen tools) and coalesces move runs per pointer before
+   writing a batch.
+3. The host's input worker applies the contact policy: the first
+   contact to go down is primary and drives the OS pointer (Windows
+   `SendInput` absolute mouse; Linux RemoteDesktop portal pointer
+   notifications) until it lifts. Additional simultaneous contacts
+   are ignored in M1 — no pointer jumps, no stuck buttons. Pen
+   pressure and tilt pass through the wire but only the pen work in
+   M3 consumes them.
+4. On session end the host releases held buttons so no contact stays
+   stuck.
+
 ## Control schemas
 
 Control payloads are protobuf (proto3, package `slateway.control.v0`). The
@@ -148,9 +167,20 @@ field selects the message:
 | 11 | RequestKeyframe | tablet to host |
 | 12+ | unassigned | |
 
+Per-channel message types (one value per channel so far):
+
+| Channel | type | Payload |
+|---|---|---|
+| video (1) | 1 | One H.264 Annex-B access unit |
+| input (2) | 1 | One batch of packed 16-byte events |
+
 Type numbers are never reused. Unknown control types are an error in
 draft v0 (both sides run the same version). Capability bitmasks have all
-bits reserved in M0; bits are documented here as they get assigned.
+bits reserved in M0; bits are documented here as they get assigned:
+
+| Bit | Announced in | Meaning |
+|---|---|---|
+| 0 | HelloAck (host) | The host accepts input-channel batches — the operator passed `--allow-input` (`SECURITY.md`, "Consent"). The tablet sends touch only while this bit is set. |
 
 ## Media
 
