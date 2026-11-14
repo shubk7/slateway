@@ -27,6 +27,8 @@ allow = [
     "MIT-0",
     "MIT",
     "MPL-2.0",
+    # ffmpeg-next (ADR-014); the FSF lists WTFPL as GPLv3-compatible.
+    "WTFPL",
     "Unicode-3.0",
     "Unicode-DFS-2016",
     "Zlib",

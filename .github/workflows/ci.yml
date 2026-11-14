@@ -46,7 +46,12 @@ jobs:
             # protoc. libpipewire-0.3-dev: pipewire-sys generates its FFI
             # bindings from the installed headers at build time; pipewire
             # itself is a Linux-target-only dependency of slateway-linux.
-            sudo apt-get install -y -q protobuf-compiler libpipewire-0.3-dev
+            # The libav*-dev set: ffmpeg-sys-next links the system
+            # FFmpeg libraries for the slateway-ffmpeg encoder; the
+            # version is auto-detected (3.0 through 9.x supported).
+            sudo apt-get install -y -q protobuf-compiler libpipewire-0.3-dev \
+              libavcodec-dev libavformat-dev libavfilter-dev libavdevice-dev \
+              libswscale-dev libswresample-dev
           elif command -v choco >/dev/null; then
             choco install protoc -y --no-progress
           else

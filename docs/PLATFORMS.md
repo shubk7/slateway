@@ -8,7 +8,7 @@ Starting points, not guarantees. Verify each API against current documentation b
 |---|---|
 | Virtual display | Indirect Display Driver (IddCx, UMDF) built from an existing open-source IDD with a compatible license (spike S2) |
 | Capture | Windows.Graphics.Capture into a D3D11 staging copy (`slateway-win::WgcCapture`); evaluate taking frames from the IDD swapchain |
-| Encode | `h264_nvenc` first, `h264_qsv` and `h264_amf` next, `libx264` ultrafast zerolatency as fallback |
+| Encode | `h264_nvenc` first, `libx264` ultrafast zerolatency as fallback for M1 (ADR-014); `h264_qsv` and `h264_amf` candidates pending input-format verification (DECISIONS pending) |
 | Input | Synthetic pointer injection (`CreateSyntheticPointerDevice`, `InjectSyntheticPointerInput`) with touch and pen types, mapped to the target monitor rectangle |
 | Virtual camera | Media Foundation virtual camera API, Windows 11 only. Windows 10 unsupported initially |
 | Virtual mic | Undecided (spike S5). Needs a virtual audio driver or an existing signed one |
@@ -26,7 +26,7 @@ Starting points, not guarantees. Verify each API against current documentation b
 | Virtual camera | `v4l2loopback` (DKMS, needs kernel headers, may need module signing under Secure Boot) |
 | Virtual mic | PipeWire source node created by the daemon |
 | Audio capture | PipeWire monitor of the default sink |
-| Encode | `h264_nvenc`, VAAPI, `libx264` fallback |
+| Encode | `h264_nvenc`, `libx264` fallback for M1 (ADR-014); VAAPI hw-frame path pending (DECISIONS pending) |
 
 ## Android
 

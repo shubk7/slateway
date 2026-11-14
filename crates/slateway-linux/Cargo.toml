@@ -23,3 +23,6 @@ pipewire = "0.10.1"
 slateway-platform = { version = "0.1.0", path = "../slateway-platform" }
 # One-shot current-thread runtime for the portal's async calls in start().
 tokio = { version = "1.54.1", features = ["rt"] }
+# FFmpeg encoder plumbing (approved as part of the M1 encoder task,
+# ADR-014; WTFPL). Needs the system libavcodec/libavutil/libswscale.
+slateway-ffmpeg = { version = "0.1.0", path = "../slateway-ffmpeg" }

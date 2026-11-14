@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+[package]
+name = "slateway-ffmpeg"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Shared FFmpeg (libavcodec) encoder plumbing for the Slateway host."
+
+[lints]
+workspace = true
+
+[dependencies]
+# Safe libavcodec wrapper (WTFPL, GPLv3-compatible; user-approved as
+# part of the M1 encoder task per ADR-014). Auto-detects the system
+# FFmpeg version; needs libavcodec/libavutil/libswscale dev packages.
+ffmpeg-next = "9.1.0"
+slateway-platform = { version = "0.1.0", path = "../slateway-platform" }

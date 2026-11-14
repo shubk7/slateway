@@ -13,6 +13,15 @@ Build, test and lint commands live in `AGENTS.md`. This file covers the environm
 
 `rustup`, `clang`, `pkgconf`, `ffmpeg`, `pipewire`, `protobuf`, `android-tools`, a JDK, Android Studio (AUR), `v4l2loopback-dkms` and matching kernel headers. Then `rustup default stable` and `cargo install cargo-deny cargo-fuzz`.
 
+FFmpeg must be installed with its development headers (`ffmpeg` on Arch
+pulls in `ffmpeg-dev` equivalents through the package); the encoder
+build links the system `libavcodec`, `libavutil` and friends via
+pkg-config (ADR-014). On Debian/Ubuntu that is `libavcodec-dev
+libavformat-dev libavfilter-dev libavdevice-dev libswscale-dev
+libswresample-dev` — the same set the CI ubuntu job installs. Any
+FFmpeg major from 3.0 through 9.x builds, but a recent one is required
+to run the NVENC hardware path.
+
 ## Android native library (ADR-013)
 
 The tablet's Noise facade is Rust (`android/native`) built with cargo-ndk:

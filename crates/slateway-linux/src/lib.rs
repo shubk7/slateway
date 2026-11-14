@@ -9,4 +9,7 @@
 pub mod capture;
 
 #[cfg(target_os = "linux")]
+pub mod encoder;
+
+#[cfg(target_os = "linux")]
 pub use capture::PortalCapture;
