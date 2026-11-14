@@ -2,9 +2,10 @@
 
 //! Scripted tablet client for Slateway tests (docs/ARCHITECTURE.md,
 //! `tools/mock-tablet`): behaves like the tablet for the daemon's M0
-//! echo session. Noise initiator with pairing confirmation handed to
-//! the caller, Hello exchange, Pong answering, and a scripted echo
-//! measurement over the experimental echo channel
+//! echo session, and since protocol minor 2 also for the M1 video
+//! stream (`run_video_client`). Noise initiator with pairing
+//! confirmation handed to the caller, Hello exchange, Pong answering,
+//! and a scripted echo measurement over the experimental echo channel
 //! (docs/PROTOCOL.md, "Channels": 16 and above).
 
 use std::io;
@@ -18,10 +19,12 @@ use slateway_core::crypto::{
 use slateway_core::stats::{SessionStats, percentile};
 use slateway_proto::Channel;
 use slateway_proto::control::{
-    CLOSE_TYPE, Close, CloseReason, HELLO_ACK_TYPE, HELLO_TYPE, Hello, HelloAck, PAIR_NEEDED_TYPE,
-    PING_TYPE, PONG_TYPE, Ping, Pong, STATS_TYPE, Stats,
+    CLOSE_TYPE, CONFIGURE_TYPE, Close, CloseReason, HELLO_ACK_TYPE, HELLO_TYPE, Hello, HelloAck,
+    PAIR_NEEDED_TYPE, PING_TYPE, PONG_TYPE, Ping, Pong, REQUEST_KEYFRAME_TYPE, STATS_TYPE,
+    STREAM_START_TYPE, STREAM_STOP_TYPE, Stats,
 };
 use slateway_proto::frame::FrameHeader;
+use slateway_proto::{VIDEO_AU_TYPE, VIDEO_KEYFRAME_FLAG};
 use tokio::io::{AsyncRead, AsyncWrite};
 
 /// Echo payload layout: 8-byte big-endian sequence, 8-byte send stamp,
@@ -291,4 +294,241 @@ async fn generate_key() -> Result<[u8; KEY_LEN], ClientError> {
         .as_slice()
         .try_into()
         .map_err(|_| ClientError::Config("generated key has the wrong length"))
+}
+
+/// What one video-mode run should do: mirror the tablet's M1 receive
+/// side (docs/PROTOCOL.md, "Channels") against the daemon.
+#[derive(Clone, Debug)]
+pub struct VideoClientConfig {
+    /// Host address to connect to.
+    pub addr: SocketAddr,
+    /// Device name reported in the handshake.
+    pub device_name: String,
+    /// Static private key; generated when none is given.
+    pub private_key: Option<[u8; KEY_LEN]>,
+    /// Access units to receive before the orderly shutdown.
+    pub frames: usize,
+    /// Send RequestKeyframe after this many AUs and require a
+    /// keyframe afterwards.
+    pub request_keyframe_after: Option<usize>,
+    /// Health-report cadence; one Stats per tick.
+    pub stats_tick: Duration,
+}
+
+impl Default for VideoClientConfig {
+    fn default() -> Self {
+        VideoClientConfig {
+            addr: SocketAddr::from(([127, 0, 0, 1], 47820)),
+            device_name: "mock-tablet".into(),
+            private_key: None,
+            frames: 10,
+            request_keyframe_after: None,
+            stats_tick: Duration::from_millis(100),
+        }
+    }
+}
+
+/// What one video-mode run observed.
+#[derive(Debug, Default)]
+pub struct VideoSummary {
+    /// The stream geometry from Configure (0 when none arrived).
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    /// AUs received.
+    pub frames: usize,
+    /// Keyframes received.
+    pub keyframes: usize,
+    /// Whether the first AU carried the keyframe flag.
+    pub first_frame_was_keyframe: bool,
+    /// Whether pts_us never went backwards.
+    pub pts_monotonic: bool,
+    /// Whether a keyframe followed the RequestKeyframe request.
+    pub keyframe_after_request: bool,
+    /// Largest AU payload seen (decoder budget sanity).
+    pub max_payload: usize,
+    /// Frame counters for the report.
+    pub stats: SessionStats,
+}
+
+/// Runs the scripted video session over `stream`: handshake, expect
+/// Configure + StreamStart, receive `frames` video AUs (answering
+/// Pings and reporting Stats like the real tablet), optionally
+/// request a keyframe mid-run, then Close. Asserts the stream
+/// invariants itself and reports the numbers.
+pub async fn run_video_client<S>(
+    cfg: &VideoClientConfig,
+    stream: S,
+) -> Result<VideoSummary, ClientError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let private = match cfg.private_key {
+        Some(key) => key,
+        None => generate_key().await?,
+    };
+    let mut summary = VideoSummary::default();
+
+    let handshake = SessionHandshake::initiator(&private)?;
+    let done = handshake
+        .complete(stream, cfg.device_name.as_bytes())
+        .await?;
+    let mut session = done.session;
+    let mut scratch = vec![0u8; MAX_PLAINTEXT];
+
+    // Hello, then HelloAck (no pairing: tests run with known tablets
+    // or --auto-pair on the daemon side).
+    let hello = Hello {
+        protocol_major: slateway_proto::control::PROTOCOL_MAJOR,
+        protocol_minor: slateway_proto::control::PROTOCOL_MINOR,
+        app_version: env!("CARGO_PKG_VERSION").into(),
+        device_model: cfg.device_name.clone(),
+        android_api: 30,
+        codecs: vec![slateway_proto::control::VideoCodec::H264High as i32],
+        decode_limits: None,
+        screen: None,
+        capabilities: 0,
+    };
+    send_control(&mut session, HELLO_TYPE, &hello.encode_to_vec()).await?;
+    loop {
+        let (header, bytes) = read_control(&mut session).await?;
+        match header.message_type {
+            HELLO_ACK_TYPE => {
+                HelloAck::decode(bytes.as_slice())?;
+                break;
+            }
+            PAIR_NEEDED_TYPE => {
+                send_control(&mut session, HELLO_TYPE, &hello.encode_to_vec()).await?
+            }
+            _ => {
+                return Err(ClientError::Protocol(
+                    "expected HelloAck before any streaming",
+                ));
+            }
+        }
+    }
+
+    // Expect Configure then StreamStart (auto-stream after handshake,
+    // the user-approved M1 flow); anything else is a violation.
+    let mut saw_configure = false;
+    let mut saw_start = false;
+    while !(saw_configure && saw_start) {
+        let (header, bytes) = read_control(&mut session).await?;
+        match header.message_type {
+            CONFIGURE_TYPE => {
+                let configure = slateway_proto::control::Configure::decode(bytes.as_slice())?;
+                summary.width = configure.width_px;
+                summary.height = configure.height_px;
+                summary.fps = configure.fps;
+                saw_configure = true;
+            }
+            STREAM_START_TYPE => {
+                if !saw_configure {
+                    return Err(ClientError::Protocol("StreamStart before Configure"));
+                }
+                saw_start = true;
+            }
+            _ => {
+                return Err(ClientError::Protocol(
+                    "expected Configure and StreamStart after HelloAck",
+                ));
+            }
+        }
+    }
+
+    // Receive loop: video AUs, Pings answered, periodic Stats, one
+    // RequestKeyframe when scripted. Every invariant the tablet's
+    // decoder would enforce is checked here.
+    let mut next_stats = tokio::time::Instant::now() + cfg.stats_tick;
+    let mut last_pts: Option<u64> = None;
+    let mut requested_at: Option<usize> = cfg
+        .request_keyframe_after
+        .filter(|after| *after < cfg.frames);
+    summary.pts_monotonic = true;
+    while summary.frames < cfg.frames {
+        let (header, payload) = tokio::select! {
+            read = read_any(&mut session, &mut scratch) => read?,
+            _ = tokio::time::sleep_until(next_stats) => {
+                let stats = Stats::default();
+                send_control(&mut session, STATS_TYPE, &stats.encode_to_vec()).await?;
+                next_stats = tokio::time::Instant::now() + cfg.stats_tick;
+                continue;
+            }
+        };
+        match (header.channel, header.message_type) {
+            (Channel::Control, PING_TYPE) => {
+                let ping = Ping::decode(payload.as_slice())?;
+                let now = slateway_core::monotonic_us();
+                let pong = Pong {
+                    t0: ping.t0,
+                    t1: now,
+                    t2: now,
+                };
+                send_control(&mut session, PONG_TYPE, &pong.encode_to_vec()).await?;
+            }
+            (Channel::Control, STREAM_STOP_TYPE) => {
+                return Err(ClientError::Protocol(
+                    "StreamStop before the scripted frame count",
+                ));
+            }
+            (Channel::Video, VIDEO_AU_TYPE) => {
+                if payload.is_empty() {
+                    return Err(ClientError::Protocol("empty video access unit"));
+                }
+                let keyframe = header.flags & VIDEO_KEYFRAME_FLAG != 0;
+                if header.flags & !VIDEO_KEYFRAME_FLAG != 0 {
+                    return Err(ClientError::Protocol("unknown video flags set"));
+                }
+                if summary.frames == 0 {
+                    summary.first_frame_was_keyframe = keyframe;
+                }
+                if keyframe {
+                    summary.keyframes += 1;
+                    // The request went out after requested_at AUs; the
+                    // next keyframe satisfies it.
+                    if let Some(after) = requested_at
+                        && summary.frames >= after
+                    {
+                        summary.keyframe_after_request = true;
+                        requested_at = None;
+                    }
+                }
+                if let Some(last) = last_pts
+                    && header.pts_us < last
+                {
+                    summary.pts_monotonic = false;
+                }
+                last_pts = Some(header.pts_us);
+                summary.max_payload = summary.max_payload.max(payload.len());
+                summary.stats.record_in(payload.len());
+                summary.frames += 1;
+                if Some(summary.frames) == requested_at {
+                    send_control(&mut session, REQUEST_KEYFRAME_TYPE, &[]).await?;
+                }
+            }
+            _ => {
+                return Err(ClientError::Protocol("unexpected frame during video"));
+            }
+        }
+    }
+    if requested_at.is_some() {
+        // The request went out but no keyframe followed: report it.
+        summary.keyframe_after_request = false;
+    }
+
+    // Orderly shutdown.
+    let close = Close {
+        reason: CloseReason::NormalShutdown as i32,
+    };
+    send_control(&mut session, CLOSE_TYPE, &close.encode_to_vec()).await?;
+    Ok(summary)
+}
+
+/// Reads one frame into a fresh vector; callers check the header.
+async fn read_any<S: AsyncRead + AsyncWrite + Unpin>(
+    session: &mut SecureSession<S>,
+    scratch: &mut [u8],
+) -> Result<(FrameHeader, Vec<u8>), ClientError> {
+    let (header, len) = session.read_frame(scratch).await?;
+    Ok((header, scratch[..len].to_vec()))
 }

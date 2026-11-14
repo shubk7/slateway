@@ -2,9 +2,11 @@
 
 //! Slateway host daemon: capture, encode and inject on the PC side.
 //! The M0 daemon serves the echo session over the loopback or adb
-//! reverse transports; capture and encoding arrive in M1.
+//! reverse transports; since protocol minor 2 `--mirror` streams the
+//! primary monitor to the tablet over the video channel.
 
 pub mod session;
+pub mod video;
 
 use slateway_core::keys::{KnownTablets, config_dir, load_or_create_host_key};
 use slateway_platform::{AdbReverseTransport, DEFAULT_PORT, LoopbackTransport, Transport};
@@ -41,6 +43,7 @@ struct Args {
     port: u16,
     auto_pair: bool,
     echo: bool,
+    mirror: bool,
     config_dir: Option<std::path::PathBuf>,
 }
 
@@ -49,6 +52,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut port = DEFAULT_PORT;
     let mut auto_pair = false;
     let mut echo = false;
+    let mut mirror = false;
     let mut config_dir = None;
     let mut iter = args;
     while let Some(arg) = iter.next() {
@@ -62,6 +66,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Args, String> {
             "--port" => port = value()?.parse().map_err(|err| format!("--port: {err}"))?,
             "--auto-pair" => auto_pair = true,
             "--echo" => echo = true,
+            "--mirror" => mirror = true,
             "--config-dir" => config_dir = Some(std::path::PathBuf::from(value()?)),
             other => return Err(format!("unknown argument {other}")),
         }
@@ -71,6 +76,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Args, String> {
         port,
         auto_pair,
         echo,
+        mirror,
         config_dir,
     })
 }
@@ -109,11 +115,12 @@ async fn run() -> Result<(), String> {
         eprintln!("slatewayd: known-tablets line {line} skipped: {problem}");
     }
     println!(
-        "slatewayd: host key loaded from {}; transport {:?} on port {}, echo {}, pairing {}",
+        "slatewayd: host key loaded from {}; transport {:?} on port {}, echo {}, mirror {}, pairing {}",
         dir.display(),
         args.transport,
         args.port,
         if args.echo { "on" } else { "off" },
+        if args.mirror { "on" } else { "off" },
         if args.auto_pair { "auto" } else { "prompted" },
     );
 
@@ -175,6 +182,7 @@ async fn run() -> Result<(), String> {
         let cfg = cfg.clone();
         let host_private = host_key.private;
         let auto_pair = args.auto_pair;
+        let mirror = args.mirror;
         let sessions = Arc::clone(&sessions);
         tokio::spawn(async move {
             // Counts this session for the tunnel-refresh gate; the
@@ -208,7 +216,14 @@ async fn run() -> Result<(), String> {
                 }
                 false
             };
-            match session::serve_once(stream, &host_private, &known, &cfg, &confirm).await {
+            // One fresh platform source per session: a previous
+            // session's capture must not leak into this one.
+            let video: Option<Box<dyn crate::video::VideoSource>> = if mirror {
+                Some(Box::new(crate::video::PlatformVideoSource))
+            } else {
+                None
+            };
+            match session::serve_once(stream, &host_private, &known, &cfg, &confirm, video).await {
                 Ok(report) => println!(
                     "session with '{}' ended: paired {}, echoed {} frames, \
                      discarded {}, frames in {} / out {}, bytes in {} / out {}, \

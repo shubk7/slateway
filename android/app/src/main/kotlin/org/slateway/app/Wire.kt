@@ -14,9 +14,11 @@ import java.net.ProtocolException
  * same numbers; a change here is a protocol change.
  */
 object Protocol {
-    /** Draft v0 (docs/PROTOCOL.md title). Minor 1 adds PairNeeded. */
+    /** Draft v0 (docs/PROTOCOL.md title). Minor 1 adds PairNeeded,
+     * minor 2 the video session messages Configure, StreamStart,
+     * StreamStop and RequestKeyframe. */
     const val PROTOCOL_MAJOR: Int = 0
-    const val PROTOCOL_MINOR: Int = 1
+    const val PROTOCOL_MINOR: Int = 2
     const val DEFAULT_PORT: Int = 47820
     const val MAX_PAYLOAD_LEN: Int = 16 * 1024 * 1024
     const val HEADER_LEN: Int = 16
@@ -32,6 +34,11 @@ object Protocol {
     const val ALL_FLAG_BITS: Int = 0b11
 
     const val CHANNEL_CONTROL: Int = 0
+
+    /** Video channel (docs/PROTOCOL.md, "Channels"): H.264 Annex-B
+     * access units, host to tablet. */
+    const val CHANNEL_VIDEO: Int = 1
+
     const val HELLO_TYPE: Int = 1
     const val HELLO_ACK_TYPE: Int = 2
     const val CLOSE_TYPE: Int = 3
@@ -43,6 +50,19 @@ object Protocol {
      * that needs the pairing code confirmed (docs/PROTOCOL.md,
      * "Handshake and versioning"). */
     const val PAIR_NEEDED_TYPE: Int = 7
+
+    /** Video session setup, host to tablet (docs/PROTOCOL.md,
+     * "Video session flow"; minor 2 adds types 8 to 11). */
+    const val CONFIGURE_TYPE: Int = 8
+    const val STREAM_START_TYPE: Int = 9
+    const val STREAM_STOP_TYPE: Int = 10
+    const val REQUEST_KEYFRAME_TYPE: Int = 11
+
+    /** Message type within the video channel: one access unit. */
+    const val VIDEO_AU_TYPE: Int = 1
+
+    /** Header flag bit0 on a video frame: the AU is an IDR keyframe. */
+    const val VIDEO_KEYFRAME_FLAG: Int = 0b01
 }
 
 /**

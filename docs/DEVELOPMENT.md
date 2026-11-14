@@ -62,6 +62,16 @@ Windows-specific notes from the M0 bring-up:
 3. `adb reverse tcp:<port> tcp:<port>` (port in `PROTOCOL.md`).
 4. Install the debug build with `./gradlew installDebug` from `android/`, then start `slatewayd`.
 
+## Mirroring
+
+`slatewayd --mirror` streams the primary monitor to the connected
+tablet after the handshake (M1; the UI-driven mode switching arrives
+in M2). The daemon picks the platform capture (portal on Linux, WGC
+on Windows) and the encoder candidate list for its OS (NVENC, then
+libx264 fallback). The tablet must be running the app build with the
+video decoder; capture setup on Linux may show a screen-share consent
+dialog once per session.
+
 ## Windows driver testing
 
 Enable test signing only on the dev install, and only after reading `PLATFORMS.md` gotchas. Disabling Secure Boot is a system-wide change.

@@ -12,7 +12,7 @@
 
 use libfuzzer_sys::fuzz_target;
 use prost::Message;
-use slateway_proto::control::{Close, Hello, HelloAck};
+use slateway_proto::control::{Close, Configure, Hello, HelloAck, StreamStart, StreamStop};
 
 fn round_trips<M: Message + PartialEq + Default + std::fmt::Debug>(data: &[u8]) {
     if let Ok(msg) = M::decode(data) {
@@ -28,4 +28,7 @@ fuzz_target!(|data: &[u8]| {
     round_trips::<Hello>(data);
     round_trips::<HelloAck>(data);
     round_trips::<Close>(data);
+    round_trips::<Configure>(data);
+    round_trips::<StreamStart>(data);
+    round_trips::<StreamStop>(data);
 });

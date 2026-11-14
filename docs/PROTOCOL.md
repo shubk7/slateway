@@ -78,7 +78,11 @@ Parsers must reject oversized lengths and unknown channels, and never allocate b
 3. `Configure`: mode (mirror, extend, drawing-tablet), target display, resolution, fps, bitrate, codec, rotation.
 4. `StreamStart`. A resolution or rotation change sends a new `Configure` followed by an IDR frame.
 
-Major mismatch is refused with an error. Minor changes are additive only (minor 1 adds `PairNeeded`). Protobuf tags are never reused. Unknown control messages are ignored if marked optional, otherwise they are an error.
+Major mismatch is refused with an error. Minor changes are additive
+only (minor 1 adds `PairNeeded`, minor 2 adds the video session
+messages `Configure`, `StreamStart`, `StreamStop`, `RequestKeyframe`).
+Protobuf tags are never reused. Unknown control messages are ignored
+if marked optional, otherwise they are an error.
 
 ## Control messages
 
@@ -138,7 +142,11 @@ field selects the message:
 | 5 | Pong | tablet to host |
 | 6 | Stats | tablet to host |
 | 7 | PairNeeded | both |
-| 8+ | unassigned | |
+| 8 | Configure | host to tablet |
+| 9 | StreamStart | host to tablet |
+| 10 | StreamStop | host to tablet |
+| 11 | RequestKeyframe | tablet to host |
+| 12+ | unassigned | |
 
 Type numbers are never reused. Unknown control types are an error in
 draft v0 (both sides run the same version). Capability bitmasks have all
@@ -146,10 +154,23 @@ bits reserved in M0; bits are documented here as they get assigned.
 
 ## Media
 
-- **Video:** H.264 High profile, Annex-B, SPS/PPS before every IDR, no B-frames.
+- **Video:** H.264 High profile, Annex-B, SPS/PPS before every IDR, no B-frames. One video-channel frame carries exactly one access unit (type 1); header flag bit0 marks IDR keyframes. `pts_us` is the capture timestamp relative to session start. The first AU of a stream (and of every new `Configure`) is a keyframe, so the tablet can join or re-join without history.
 - **Audio:** Opus, 48 kHz. 10 ms frames PC to tablet, 20 ms frames for the mic.
 - **Camera:** H.264 from the tablet encoder. `Configure` carries rotation and mirror flags.
 - **Clipboard:** UTF-8 text, at most 1 MiB, origin id and sequence number to prevent echo loops.
+
+## Video session flow (minor 2)
+
+1. After `HelloAck`, in M1 the host auto-streams when mirroring is
+   enabled (`slatewayd --mirror`): `Configure` (mode `Mirror`,
+   streamed geometry, fps, codec; `bitrate_kbps` 0 means the encoder's
+   geometry default), then `StreamStart`, then video AUs. Both control
+   frames queue before the first AU, so wire order holds.
+2. A resolution or rotation change sends a new `Configure` followed by
+   an IDR frame (a fresh encoder open; SPS/PPS ride in the keyframe).
+3. After a decoder reset the tablet sends `RequestKeyframe`; the host
+   re-opens its encoder, which restarts the stream at SPS/PPS + IDR.
+4. `StreamStop` ends the stream; the tablet releases its decoder.
 
 ## Backpressure
 

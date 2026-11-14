@@ -97,6 +97,39 @@ message DecodeLimits {
   uint32 max_fps = 3;
 }
 
+// Session setup, host to tablet (frame type 8). Sent before streaming;
+// on a resolution or rotation change the host sends a new Configure
+// followed by a new StreamStart and a keyframe.
+message Configure {
+  StreamMode mode = 1;
+  // Streamed geometry (the source, e.g. a monitor, in mirror mode).
+  uint32 width_px = 2;
+  uint32 height_px = 3;
+  uint32 fps = 4;
+  uint32 bitrate_kbps = 5;
+  VideoCodec codec = 6;
+}
+
+// Host announces the video stream starting (frame type 9). It follows
+// Configure; the video frames after it belong to that configuration
+// and start with a keyframe.
+message StreamStart {}
+
+// Host stops the video stream (frame type 10); the tablet releases
+// its decoder.
+message StreamStop {}
+
+// Tablet to host (frame type 11): the decoder was reset (or frames
+// were lost, once datagram transports exist) and the tablet needs an
+// IDR to resync.
+message RequestKeyframe {}
+
+enum StreamMode {
+  STREAM_MODE_UNKNOWN = 0;
+  // Mirror the host monitor the session was started with.
+  MIRROR = 1;
+}
+
 message Screen {
   uint32 width_px = 1;
   uint32 height_px = 2;

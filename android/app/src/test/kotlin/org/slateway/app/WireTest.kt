@@ -27,9 +27,10 @@ class WireTest {
         val hello = buildHello(appVersion = "0.1.0", deviceModel = "Tab", androidApi = 30)
         assertArrayEquals(
             byteArrayOf(
-                // protocol_minor, field 2, varint 1 (minor 1 adds
-                // PairNeeded; major 0 is zero and omitted)
-                0x10, 0x01,
+                // protocol_minor, field 2, varint 2 (minor 1 adds
+                // PairNeeded, minor 2 the video session messages;
+                // major 0 is zero and omitted)
+                0x10, 0x02,
                 // app_version, field 3: "0.1.0"
                 0x1a, 0x05, 0x30, 0x2e, 0x31, 0x2e, 0x30,
                 // device_model, field 4: "Tab"
@@ -192,6 +193,22 @@ class WireTest {
         assertEquals(123456L, parsed.t0)
         assertEquals(200000L, parsed.t1)
         assertEquals(200050L, parsed.t2)
+    }
+
+    @Test
+    fun videoConstantsMatchTheProtocolDoc() {
+        // Cross-checked against docs/PROTOCOL.md ("Channels", "Video
+        // session flow") and the Rust pins (crates/slateway-proto
+        // src/{control,video}.rs): a change on either side is a
+        // protocol break caught here.
+        assertEquals(2, Protocol.PROTOCOL_MINOR)
+        assertEquals(1, Protocol.CHANNEL_VIDEO)
+        assertEquals(8, Protocol.CONFIGURE_TYPE)
+        assertEquals(9, Protocol.STREAM_START_TYPE)
+        assertEquals(10, Protocol.STREAM_STOP_TYPE)
+        assertEquals(11, Protocol.REQUEST_KEYFRAME_TYPE)
+        assertEquals(1, Protocol.VIDEO_AU_TYPE)
+        assertEquals(0b01, Protocol.VIDEO_KEYFRAME_FLAG)
     }
 
     private fun assertProtocolError(block: () -> Unit) {

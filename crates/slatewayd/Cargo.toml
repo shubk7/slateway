@@ -20,6 +20,17 @@ slateway-proto = { path = "../slateway-proto", version = "0.1.0" }
 thiserror = "2.0.21"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 
+# Platform video backends for --mirror (AGENTS.md rule 2: platform
+# code only behind the cfg gates).
+[target.'cfg(target_os = "linux")'.dependencies]
+slateway-linux = { path = "../slateway-linux", version = "0.1.0" }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+slateway-win = { path = "../slateway-win", version = "0.1.0" }
+
 [dev-dependencies]
 mock-tablet = { path = "../../tools/mock-tablet", version = "0.1.0" }
+# The video-session rehearsal runs a real software encoder (libx264)
+# so the mock tablet receives decodable Annex-B AUs on every OS.
+slateway-ffmpeg = { path = "../slateway-ffmpeg", version = "0.1.0" }
 tempfile = "3"

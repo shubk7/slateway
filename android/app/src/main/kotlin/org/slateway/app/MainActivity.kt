@@ -21,6 +21,7 @@ class MainActivity : Activity() {
 
     private lateinit var status: TextView
     private lateinit var pairButton: Button
+    private lateinit var videoSurface: android.view.SurfaceView
     private val handler = Handler(Looper.getMainLooper())
 
     private val refreshStatus = object : Runnable {
@@ -40,6 +41,25 @@ class MainActivity : Activity() {
         setContentView(R.layout.activity_main)
         status = findViewById(R.id.status)
         status.text = ConnectionService.statusText
+        videoSurface = findViewById(R.id.video)
+        videoSurface.holder.addCallback(object : android.view.SurfaceHolder.Callback {
+            override fun surfaceCreated(holder: android.view.SurfaceHolder) {
+                ConnectionService.videoSurfaceHolder = holder
+                ConnectionService.attachVideoSurface(holder.surface)
+            }
+
+            override fun surfaceChanged(
+                holder: android.view.SurfaceHolder,
+                format: Int,
+                width: Int,
+                height: Int,
+            ) {}
+
+            override fun surfaceDestroyed(holder: android.view.SurfaceHolder) {
+                ConnectionService.videoSurfaceHolder = null
+                ConnectionService.detachVideoSurface()
+            }
+        })
         pairButton = findViewById(R.id.pair)
         pairButton.visibility = View.GONE
         pairButton.setOnClickListener {

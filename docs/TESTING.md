@@ -35,6 +35,22 @@ Android and One UI versions: record here once checked.
 
 Cable pull and replug, tablet screen off and on, rotation, host sleep and wake, 10-minute soak without dropped frames, daemon crash leaves no virtual display or device behind.
 
+## M1 video verification (owed on hardware)
+
+The CI rehearsal covers the wire and encoder logic against
+`mock-tablet`'s video mode with libx264 (slatewayd's
+`mirror_video` integration test). These stay owed on the reference
+tablets (spike S4):
+
+- Real `--mirror` session over adb reverse: picture visible on the
+  tablet, no drift after 10 minutes.
+- MediaCodec low-latency decode behaviour on Tab A7 and Tab S6 Lite:
+  `KEY_LOW_LATENCY` support per device, actual latency, decoder
+  reconfig on resolution change.
+- Rotation and resolution change: new `Configure`, new keyframe,
+  decoder keeps up.
+- Record results with date and commit in the results log.
+
 ## Results log
 
 (none yet)

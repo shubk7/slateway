@@ -17,12 +17,15 @@ pub mod channel;
 pub mod control;
 pub mod frame;
 pub mod input;
+pub mod video;
 
 pub use channel::{Channel, UnknownChannelError};
 pub use control::{
-    CLOSE_TYPE, Close, CloseReason, DecodeLimits, HELLO_ACK_TYPE, HELLO_TYPE, Hello, HelloAck,
-    PAIR_NEEDED_TYPE, PING_TYPE, PONG_TYPE, PairNeeded, Ping, Pong, STATS_TYPE, Screen, Stats,
-    VideoCodec,
+    CLOSE_TYPE, CONFIGURE_TYPE, Close, CloseReason, Configure, DecodeLimits, HELLO_ACK_TYPE,
+    HELLO_TYPE, Hello, HelloAck, PAIR_NEEDED_TYPE, PING_TYPE, PONG_TYPE, PairNeeded, Ping, Pong,
+    REQUEST_KEYFRAME_TYPE, STATS_TYPE, STREAM_START_TYPE, STREAM_STOP_TYPE, Screen, Stats,
+    StreamMode, StreamStart, StreamStop, VideoCodec,
 };
 pub use frame::{FrameError, FrameHeader, HEADER_LEN, MAX_PAYLOAD_LEN};
 pub use input::{BatchEncodeError, EVENT_LEN, InputError, InputEvent};
+pub use video::{VIDEO_AU_TYPE, VIDEO_KEYFRAME_FLAG};

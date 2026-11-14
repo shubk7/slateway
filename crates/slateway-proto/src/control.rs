@@ -10,8 +10,10 @@
 pub const PROTOCOL_MAJOR: u32 = 0;
 
 /// Protocol minor version; additive changes bump this. Bumped to 1
-/// for the PairNeeded pairing signal (type 7).
-pub const PROTOCOL_MINOR: u32 = 1;
+/// for the PairNeeded pairing signal (type 7), to 2 for the video
+/// session messages Configure, StreamStart, StreamStop and
+/// RequestKeyframe (types 8 to 11).
+pub const PROTOCOL_MINOR: u32 = 2;
 
 /// Frame header `type` for [`Hello`].
 pub const HELLO_TYPE: u16 = 1;
@@ -34,6 +36,18 @@ pub const STATS_TYPE: u16 = 6;
 /// Frame header `type` for [`PairNeeded`] (both directions, first
 /// control frame of a side that needs the pairing code confirmed).
 pub const PAIR_NEEDED_TYPE: u16 = 7;
+
+/// Frame header `type` for [`Configure`] (host to tablet).
+pub const CONFIGURE_TYPE: u16 = 8;
+
+/// Frame header `type` for [`StreamStart`] (host to tablet).
+pub const STREAM_START_TYPE: u16 = 9;
+
+/// Frame header `type` for [`StreamStop`] (host to tablet).
+pub const STREAM_STOP_TYPE: u16 = 10;
+
+/// Frame header `type` for [`RequestKeyframe`] (tablet to host).
+pub const REQUEST_KEYFRAME_TYPE: u16 = 11;
 
 include!(concat!(env!("OUT_DIR"), "/slateway.control.v0.rs"));
 
@@ -71,9 +85,10 @@ mod tests {
         assert_eq!(
             hello.encode_to_vec(),
             [
-                // protocol_minor, field 2, varint 1 (minor 1 adds
-                // PairNeeded; major 0 is zero and omitted)
-                0x10, 0x01, // app_version, field 3, length-delimited: "0.1.0"
+                // protocol_minor, field 2, varint 2 (minor 1 adds
+                // PairNeeded, minor 2 the video session messages;
+                // major 0 is zero and omitted)
+                0x10, 0x02, // app_version, field 3, length-delimited: "0.1.0"
                 0x1a, 0x05, b'0', b'.', b'1', b'.', b'0', // device_model, field 4: "Tab"
                 0x22, 0x03, b'T', b'a', b'b', // android_api, field 5, varint 30
                 0x28, 0x1e,
@@ -107,7 +122,11 @@ mod tests {
         assert_eq!(PONG_TYPE, 5);
         assert_eq!(STATS_TYPE, 6);
         assert_eq!(PAIR_NEEDED_TYPE, 7);
-        assert_eq!(PROTOCOL_MINOR, 1);
+        assert_eq!(CONFIGURE_TYPE, 8);
+        assert_eq!(STREAM_START_TYPE, 9);
+        assert_eq!(STREAM_STOP_TYPE, 10);
+        assert_eq!(REQUEST_KEYFRAME_TYPE, 11);
+        assert_eq!(PROTOCOL_MINOR, 2);
     }
 
     /// A Hello rides in a control frame: the whole frame round-trips

@@ -12,6 +12,7 @@ import android.os.IBinder
 import android.util.Log
 import slateway.control.v0.Close
 import slateway.control.v0.CloseReason
+import slateway.control.v0.Configure
 import slateway.control.v0.HelloAck
 import java.io.BufferedInputStream
 import java.io.DataInputStream
@@ -225,39 +226,102 @@ class ConnectionService : Service() {
                     )
                     Log.i(tag, "handshake complete with host app '${ack.appVersion}'")
 
-                    // The M0 shell answers clock-sync pings and holds
-                    // the session open; the daemon drives the echo.
+                    // M1: the session answers clock pings and renders
+                    // the host's mirror stream (docs/PROTOCOL.md,
+                    // "Video session flow"). The decoder is created
+                    // before the loop so a Configure arriving right
+                    // after HelloAck finds it.
+                    val decoder = VideoDecoder()
+                    videoDecoder = decoder
+                    val surface = videoSurface
+                    if (surface != null) {
+                        decoder.attachSurface(surface)
+                    }
                     var pongs = 0
-                    while (true) {
-                        val (frame, payload) = channel.readFrame(input)
-                        if (frame.channel == Protocol.CHANNEL_CONTROL && frame.type == Protocol.PING_TYPE) {
-                            // A malformed Ping is discarded like any
-                            // other frame, not fatal: the next tick
-                            // resyncs (the data is authenticated, so
-                            // this would be a host bug, not an attack).
-                            val pong = try {
-                                // t1 stamps the ping's arrival and t2
-                                // the reply's send; stamping t1 any
-                                // earlier would count idle waiting
-                                // into the host's RTT math
-                                // (docs/PROTOCOL.md, "Clocks").
-                                val t1 = android.os.SystemClock.elapsedRealtimeNanos() / 1000
-                                buildPong(payload, t1, android.os.SystemClock.elapsedRealtimeNanos() / 1000)
-                            } catch (e: Exception) {
-                                Log.w(tag, "session: discarded a malformed ping", e)
-                                null
-                            }
-                            if (pong != null) {
-                                channel.writeFrame(
-                                    output,
-                                    FrameHeader(Protocol.CHANNEL_CONTROL, 0, Protocol.PONG_TYPE, pong.size, 0),
-                                    pong,
-                                )
-                                pongs++
-                                if (pongs == 1) Log.i(tag, "session: first clock ping answered")
+                    var frames = 0L
+                    var keyframes = 0L
+                    try {
+                        while (true) {
+                            val (frame, payload) = channel.readFrame(input)
+                            when (frame.channel) {
+                                Protocol.CHANNEL_CONTROL -> when (frame.type) {
+                                    Protocol.PING_TYPE -> {
+                                        // A malformed Ping is discarded like any
+                                        // other frame, not fatal: the next tick
+                                        // resyncs (the data is authenticated, so
+                                        // this would be a host bug, not an attack).
+                                        val pong = try {
+                                            // t1 stamps the ping's arrival and t2
+                                            // the reply's send; stamping t1 any
+                                            // earlier would count idle waiting
+                                            // into the host's RTT math
+                                            // (docs/PROTOCOL.md, "Clocks").
+                                            val t1 = android.os.SystemClock.elapsedRealtimeNanos() / 1000
+                                            buildPong(payload, t1, android.os.SystemClock.elapsedRealtimeNanos() / 1000)
+                                        } catch (e: Exception) {
+                                            Log.w(tag, "session: discarded a malformed ping", e)
+                                            null
+                                        }
+                                        if (pong != null) {
+                                            channel.writeFrame(
+                                                output,
+                                                FrameHeader(Protocol.CHANNEL_CONTROL, 0, Protocol.PONG_TYPE, pong.size, 0),
+                                                pong,
+                                            )
+                                            pongs++
+                                            if (pongs == 1) Log.i(tag, "session: first clock ping answered")
+                                        }
+                                    }
+                                    Protocol.CONFIGURE_TYPE -> {
+                                        val configure = Configure.parseFrom(payload)
+                                        Log.i(
+                                            tag,
+                                            "video: configure ${configure.widthPx}x${configure.heightPx}@${configure.fps}"
+                                        )
+                                        decoder.configure(
+                                            configure.widthPx,
+                                            configure.heightPx,
+                                            videoSurface,
+                                        )
+                                    }
+                                    Protocol.STREAM_START_TYPE -> Log.i(tag, "video: stream started")
+                                    Protocol.STREAM_STOP_TYPE -> decoder.stop()
+                                    Protocol.CLOSE_TYPE -> throw ProtocolException("host closed the session")
+                                    else -> {} // Unknown types are discarded (docs/PROTOCOL.md).
+                                }
+                                Protocol.CHANNEL_VIDEO -> {
+                                    if (frame.type != Protocol.VIDEO_AU_TYPE) {
+                                        // Unknown video types are discarded.
+                                        continue
+                                    }
+                                    val keyframe = frame.flags and Protocol.VIDEO_KEYFRAME_FLAG != 0
+                                    decoder.decode(payload, keyframe)
+                                    frames++
+                                    if (keyframe) keyframes++
+                                    if (decoder.lastError != null) {
+                                        // The decoder reset itself after the
+                                        // error; ask the host for a fresh
+                                        // IDR (docs/PROTOCOL.md, "Video
+                                        // session flow").
+                                        Log.w(tag, "video: decode error, requesting keyframe")
+                                        decoder.clearError()
+                                        channel.writeFrame(
+                                            output,
+                                            FrameHeader(Protocol.CHANNEL_CONTROL, 0, Protocol.REQUEST_KEYFRAME_TYPE, 0, 0),
+                                            ByteArray(0),
+                                        )
+                                    }
+                                    if (frames == 1L) Log.i(tag, "video: first AU decoded")
+                                    if (frames % 600L == 0L) {
+                                        update("mirroring ($frames frames, $keyframes keyframes)")
+                                    }
+                                }
+                                else -> {} // Other channels arrive in later milestones.
                             }
                         }
-                        // Other frames are discarded for now.
+                    } finally {
+                        decoder.release()
+                        videoDecoder = null
                     }
                 }
             }
@@ -355,6 +419,38 @@ class ConnectionService : Service() {
         @Volatile
         var statusText: String = "disconnected"
             private set
+
+        /** The active session's decoder, if any; the activity hands
+         * it the display surface. */
+        @Volatile
+        internal var videoDecoder: VideoDecoder? = null
+
+        /** The SurfaceHolder the activity registered, if any; null
+         * while no surface exists. */
+        @Volatile
+        internal var videoSurfaceHolder: android.view.SurfaceHolder? = null
+
+        /** The decoded-video surface, handed by the activity. */
+        @Volatile
+        private var videoSurfaceInternal: android.view.Surface? = null
+
+        /** The decoded-video surface for the active session, or null. */
+        val videoSurface: android.view.Surface?
+            get() = videoSurfaceInternal
+
+        /** The activity's video surface became available (or was
+         * re-created after a rotation); attach it to the running
+         * decoder. Called on the main thread. */
+        fun attachVideoSurface(surface: android.view.Surface) {
+            videoSurfaceInternal = surface
+            videoDecoder?.attachSurface(surface)
+        }
+
+        /** The surface went away; the decoder keeps queueing
+         * newest-only until a new one arrives. */
+        fun detachVideoSurface() {
+            videoSurfaceInternal = null
+        }
     }
 
     /** The pending pairing prompt, if any. */
