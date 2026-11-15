@@ -331,3 +331,60 @@ async fn mirror_session_streams_decodable_keyframes() {
         0
     );
 }
+
+/// Reconnect after cable pull (docs/ROADMAP.md M1, host side): the
+/// same tablet key serves a second mirror session after the first
+/// ended — no re-pairing, and the stream opens with a fresh keyframe
+/// because each session starts a new encoder.
+#[tokio::test(flavor = "multi_thread")]
+async fn reconnect_resumes_the_mirror_stream() {
+    let (_dir, known) = known_registry();
+    let host_priv = host_key();
+    let (tablet_priv, _) = generate_keypair().unwrap();
+    let tablet_key: [u8; KEY_LEN] = tablet_priv.as_slice().try_into().unwrap();
+
+    for run in 1..=2 {
+        let (a, b) = tokio::io::duplex(64 * 1024);
+        let known = Arc::clone(&known);
+        let server = tokio::spawn(async move {
+            let cfg = SessionConfig {
+                echo: false,
+                tick: Duration::from_millis(20),
+                input: false,
+            };
+            let confirm = |_code: &str, _device: &str| true;
+            serve_once(
+                a,
+                &host_priv,
+                &known,
+                &cfg,
+                &confirm,
+                Some(Box::new(TestVideoSource {
+                    recorder: RecorderInjector::default(),
+                })),
+            )
+            .await
+        });
+        let client_cfg = mock_tablet::VideoClientConfig {
+            frames: 4,
+            device_name: "replug-tablet".into(),
+            private_key: Some(tablet_key),
+            ..Default::default()
+        };
+        let client = mock_tablet::run_video_client(&client_cfg, b);
+        let (client_res, server_res) = tokio::join!(client, server);
+        let summary = client_res.unwrap_or_else(|err| panic!("run {run} client failed: {err}"));
+        let report = server_res
+            .unwrap_or_else(|err| panic!("run {run} server task failed: {err:?}"))
+            .unwrap_or_else(|err| panic!("run {run} server failed: {err}"));
+        // The stream came back up: Configure geometry, keyframe first.
+        assert_eq!(summary.width, 64);
+        assert!(summary.first_frame_was_keyframe, "run {run}");
+        assert_eq!(summary.frames, 4, "run {run}");
+        assert!(
+            report.paired == (run == 1),
+            "run 1 pairs, run 2 is recognized without re-pairing"
+        );
+        assert_eq!(report.device_name, "replug-tablet");
+    }
+}

@@ -55,6 +55,11 @@ tablets (spike S4, M1 exit criteria):
   finger touch causes no pointer jumps; verify on both tablets, both
   OSes (Linux needs the portal RemoteDesktop grant in the consent
   dialog).
+- Cable pull and replug: the tablet notification walks through
+  "reconnecting (attempt N/40)" and the stream resumes on replug
+  without touching the app; the host re-registers adb reverse while
+  no session is live. Confirm no portal dialog spam (one consent per
+  session) and no stuck pointer buttons after the pull.
 - Record results with date and commit in the results log.
 
 ## Results log

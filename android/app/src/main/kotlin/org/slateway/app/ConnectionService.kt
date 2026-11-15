@@ -94,10 +94,36 @@ class ConnectionService : Service() {
             stopSelf()
             return
         }
-        try {
-            Socket().use { s ->
-                synchronized(this) { socket = s }
+        // Reconnect after cable pull (docs/ROADMAP.md M1): a pulled
+        // cable kills the socket, not the intent. Retry with capped
+        // backoff while the service runs, so a replug within the
+        // window resumes the stream without touching the app.
+        var attempt = 0
+        while (running) {
+            attempt += 1
+            if (attempt > 1) {
+                val delay = retryDelayMs(attempt - 1)
+                update(
+                    "reconnecting (attempt $attempt/$MAX_RETRY_ATTEMPTS in ${delay / 1000} s)…",
+                )
+                // Sleep in slices so an explicit disconnect (onDestroy
+                // clears `running`) ends the wait immediately.
+                var slept = 0L
+                while (running && slept < delay) {
+                    try {
+                        Thread.sleep(RETRY_SLICE_MS)
+                    } catch (_: InterruptedException) {
+                        return // stopping; finally below runs in runSession
+                    }
+                    slept += RETRY_SLICE_MS
+                }
+                if (!running) break
                 stage = "connecting to host"
+            }
+            try {
+                Socket().use { s ->
+                    synchronized(this) { socket = s }
+                    stage = "connecting to host"
                 s.connect(InetSocketAddress("127.0.0.1", port), CONNECT_TIMEOUT_MS)
                 s.tcpNoDelay = true
                 s.soTimeout = HANDSHAKE_TIMEOUT_MS
@@ -344,18 +370,34 @@ class ConnectionService : Service() {
                     }
                 }
             }
-        } catch (e: Exception) {
-            // Never log frame or input contents (docs/SECURITY.md): the
-            // exception class, its message and our own short messages
-            // only.
-            Log.e(tag, "session failed during stage: $stage", e)
-            update("disconnected: ${e.javaClass.simpleName} ($stage)")
-        } finally {
-            synchronized(this) { socket = null }
-            running = false
-            // Only this start: a newer intent keeps the service alive.
-            stopSelf(startId)
+                // The session loop only exits via exception; falling
+                // through means the socket died without one (plain
+                // EOF surfaced as an exception already) — treat like
+                // any disconnect and retry.
+            } catch (e: ProtocolException) {
+                // Protocol failures (pairing refused, major mismatch,
+                // the host's Close) do not heal on a retry: the user
+                // or the setup must change first.
+                Log.e(tag, "session failed during stage: $stage", e)
+                update("disconnected: ${e.javaClass.simpleName} ($stage)")
+            } catch (e: Exception) {
+                // Never log frame or input contents (docs/SECURITY.md):
+                // the exception class, its message and our own short
+                // messages only. Socket errors are the cable-pull case.
+                Log.e(tag, "session failed during stage: $stage", e)
+                if (!running || attempt >= MAX_RETRY_ATTEMPTS) {
+                    update("disconnected: ${e.javaClass.simpleName} ($stage)")
+                }
+                // Otherwise the loop retries after the backoff delay.
+            }
         }
+        if (running && attempt > MAX_RETRY_ATTEMPTS) {
+            update("disconnected: gave up after $MAX_RETRY_ATTEMPTS reconnect attempts")
+        }
+        synchronized(this) { socket = null }
+        running = false
+        // Only this start: a newer intent keeps the service alive.
+        stopSelf(startId)
     }
 
     /**
@@ -426,6 +468,25 @@ class ConnectionService : Service() {
         private const val CONNECT_TIMEOUT_MS = 5000
         private const val HANDSHAKE_TIMEOUT_MS = 5000
         private const val PAIRING_TIMEOUT_MS = 120_000L
+
+        /** Reconnect attempts after a socket death (cable pull):
+         * 1 s, 2 s, 4 s, then 8 s per attempt — about 5 minutes of
+         * coverage before giving up, far beyond a replug's reach.
+         * Protocol failures never retry (see the catch in
+         * runSession). */
+        internal const val MAX_RETRY_ATTEMPTS = 40
+
+        /** Granularity of the retry wait so an explicit disconnect
+         * ends it promptly. */
+        private const val RETRY_SLICE_MS = 200L
+
+        /** Backoff for the `attempt`-th retry (1-based): doubling
+         * from 1 s, capped at 8 s. Internal for the JVM test. */
+        internal fun retryDelayMs(attempt: Int): Long {
+            require(attempt >= 1) { "retry attempts start at 1" }
+            val shift = (attempt - 1).coerceAtMost(3)
+            return 1000L shl shift
+        }
 
         /**
          * Pairing prompt state; the activity reads `code` and calls
