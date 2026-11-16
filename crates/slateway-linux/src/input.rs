@@ -87,10 +87,13 @@ impl PointerInjector for PortalPointer {
         match event.kind {
             EventKind::Down => {
                 // Motion first, then the press: the click lands where
-                // the finger touched. The portal expects 0..1 in the
-                // stream's logical coordinate space.
-                let x = event.x as f64 / u16::MAX as f64;
-                let y = event.y as f64 / u16::MAX as f64;
+                // the finger touched. The portal expects coordinates in
+                // the stream's logical coordinate space
+                // (NotifyPointerMotionAbsolute, "see the logical_size
+                // stream property in ScreenCast" — the xdg RemoteDesktop
+                // spec), not normalized 0..1.
+                let x = event.x as f64 / u16::MAX as f64 * handle.target.width as f64;
+                let y = event.y as f64 / u16::MAX as f64 * handle.target.height as f64;
                 runtime.block_on(async move {
                     proxy
                         .notify_pointer_motion_absolute(session, stream, x, y, Default::default())
@@ -108,8 +111,8 @@ impl PointerInjector for PortalPointer {
                 })
             }
             EventKind::Move => {
-                let x = event.x as f64 / u16::MAX as f64;
-                let y = event.y as f64 / u16::MAX as f64;
+                let x = event.x as f64 / u16::MAX as f64 * handle.target.width as f64;
+                let y = event.y as f64 / u16::MAX as f64 * handle.target.height as f64;
                 runtime.block_on(async move {
                     proxy
                         .notify_pointer_motion_absolute(session, stream, x, y, Default::default())
