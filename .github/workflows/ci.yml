@@ -27,7 +27,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        # ubuntu-latest migrated to 26.04 in November 2026 and the
+        # runner's libavcodec began rejecting the libx264 open with
+        # EINVAL (local n9.0.2 opens fine) - pinned until the FFmpeg
+        # 9.1+ option handling is investigated (see DEVELOPMENT.md).
+        os: [ubuntu-24.04, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7

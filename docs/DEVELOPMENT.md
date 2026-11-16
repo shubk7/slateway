@@ -22,6 +22,12 @@ libswresample-dev` — the same set the CI ubuntu job installs. Any
 FFmpeg major from 3.0 through 9.x builds, but a recent one is required
 to run the NVENC hardware path.
 
+Known runtime limit: FFmpeg 9.0.2 (Arch, Windows CI's gyan build)
+opens `libx264` fine; the Ubuntu 26.04 archive's libavcodec rejects
+the same open with `Invalid argument`, so the CI Rust job is pinned
+to `ubuntu-24.04` until the option handling on that build is
+investigated (spike owed, see `docs/DECISIONS.md` pending items).
+
 ## Android native library (ADR-013)
 
 The tablet's Noise facade is Rust (`android/native`) built with cargo-ndk:
