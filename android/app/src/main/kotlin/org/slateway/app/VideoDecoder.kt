@@ -3,6 +3,8 @@
 package org.slateway.app
 
 import android.media.MediaCodec
+import android.media.MediaCodecInfo
+import android.media.MediaCodecList
 import android.media.MediaFormat
 import android.util.Log
 import android.view.Surface
@@ -40,6 +42,11 @@ class VideoDecoder {
     private var width: Int = 0
     private var height: Int = 0
     private var surface: Surface? = null
+
+    /** The AVC inventory dump runs once per decoder instance: every
+     * failed open repeats otherwise (the host re-opens its encoder on
+     * each keyframe request). */
+    private var inventoryDumped = false
 
     /** AUs waiting for a Surface; replaced by the newest frame. */
     private var pending: ByteArray? = null
@@ -106,7 +113,7 @@ class VideoDecoder {
             // A bad AU or a stale codec must not kill the session; the
             // tablet asks for a keyframe and the host re-opens its
             // encoder (docs/PROTOCOL.md, "Video session flow").
-            lastError = e.message ?: e.javaClass.simpleName
+            lastError = describe(e)
             Log.w(TAG, "decode failed, requesting keyframe", e)
             release()
             pending = data
@@ -147,7 +154,7 @@ class VideoDecoder {
                 openCodec(surface, waiting)
                 feed(waiting, waitingKeyframe)
             } catch (e: Exception) {
-                lastError = e.message ?: e.javaClass.simpleName
+                lastError = describe(e)
                 Log.w(TAG, "queued keyframe decode failed", e)
                 release()
             }
@@ -161,27 +168,126 @@ class VideoDecoder {
      * keyframe AU (csd-0 = SPS, csd-1 = PPS, the AVC convention). AUs
      * without them still open: in-band parameter sets cover the
      * decoders that accept them.
+     *
+     * A configure rejection carries no readable message on some
+     * devices (CodecException with an empty message), so the open
+     * ladders through format variants (no low-latency key, no csd)
+     * and then through every AVC decoder on the device by name — the
+     * default pick of createDecoderByType need not be the one that
+     * accepts the panel's resolution. If everything fails, the AVC
+     * decoder inventory with per-size support is logged once so the
+     * next session pinpoints the rejected key or dimension.
      */
     private fun openCodec(surface: Surface, keyframeAu: ByteArray) {
+        val (sps, pps) = parameterSets(keyframeAu)
+        Log.i(TAG, "decoder open ${width}x${height}: csd sps=${sps?.size ?: -1} B, pps=${pps?.size ?: -1} B")
+        val variants = linkedMapOf(
+            "csd+low-latency" to buildFormat(sps, pps, lowLatency = true),
+            "csd" to buildFormat(sps, pps, lowLatency = false),
+            "no-csd" to buildFormat(null, null, lowLatency = false),
+        )
+        val failures = StringBuilder()
+        for ((label, format) in variants) {
+            if (tryOpen(null, format, label, failures)) return
+        }
+        for (info in avcDecoders()) {
+            for ((label, format) in variants) {
+                if (tryOpen(info.name, format, "${info.name} $label", failures)) return
+            }
+        }
+        if (!inventoryDumped) {
+            inventoryDumped = true
+            dumpAvcInventory()
+        }
+        lastError = failures.toString().trimEnd(';', ' ')
+        Log.e(TAG, "decoder open failed after every variant")
+    }
+
+    private fun buildFormat(sps: ByteArray?, pps: ByteArray?, lowLatency: Boolean): MediaFormat {
         val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height)
-        if (android.os.Build.VERSION.SDK_INT >= 30) {
+        sps?.let { format.setByteBuffer("csd-0", java.nio.ByteBuffer.wrap(it)) }
+        pps?.let { format.setByteBuffer("csd-1", java.nio.ByteBuffer.wrap(it)) }
+        if (lowLatency && android.os.Build.VERSION.SDK_INT >= 30) {
             // Latency keys vary per codec; verify on the reference
             // devices (spike S4) before relying on them.
             format.setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
         }
-        val (sps, pps) = parameterSets(keyframeAu)
-        sps?.let { format.setByteBuffer("csd-0", java.nio.ByteBuffer.wrap(it)) }
-        pps?.let { format.setByteBuffer("csd-1", java.nio.ByteBuffer.wrap(it)) }
+        return format
+    }
+
+    /** Creates, configures and starts one candidate; releases it on
+     * failure and records a one-line reason. `name == null` picks the
+     * platform default (createDecoderByType). */
+    private fun tryOpen(
+        name: String?,
+        format: MediaFormat,
+        label: String,
+        failures: StringBuilder,
+    ): Boolean {
+        var candidate: MediaCodec? = null
         try {
-            val newCodec = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
-            newCodec.configure(format, surface, null, 0)
-            newCodec.start()
-            codec = newCodec
+            candidate = if (name == null) {
+                MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+            } else {
+                MediaCodec.createByCodecName(name)
+            }
+            candidate.configure(format, surface, null, 0)
+            candidate.start()
+            codec = candidate
+            Log.i(TAG, "decoder opened ($label)")
+            return true
         } catch (e: Exception) {
-            lastError = e.message ?: e.javaClass.simpleName
-            Log.e(TAG, "MediaCodec configure failed", e)
+            val reason = describe(e)
+            Log.e(TAG, "decoder open failed ($label): $reason", e)
+            failures.append("[$label] $reason; ")
+            try {
+                candidate?.release()
+            } catch (releaseFailed: Exception) {
+                Log.w(TAG, "codec release after a failed open failed", releaseFailed)
+            }
             codec = null
+            return false
         }
+    }
+
+    /** Every AVC decoder the device offers, in the platform's order. */
+    private fun avcDecoders(): List<MediaCodecInfo> {
+        return try {
+            MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.filter {
+                !it.isEncoder && it.supportedTypes.contains(MediaFormat.MIMETYPE_VIDEO_AVC)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "decoder inventory unavailable", e)
+            emptyList()
+        }
+    }
+
+    /** One line per AVC decoder: does it advertise the size at all? */
+    private fun dumpAvcInventory() {
+        for (info in avcDecoders()) {
+            try {
+                val caps = info.getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_AVC)
+                    .getVideoCapabilities()
+                Log.w(
+                    TAG,
+                    "avc decoder '${info.name}': ${width}x$height supported=" +
+                        "${caps.isSizeSupported(width, height)}, widths=${caps.supportedWidths}, " +
+                        "heights=${caps.supportedHeights}, align=${caps.widthAlignment}x${caps.heightAlignment}",
+                )
+            } catch (e: Exception) {
+                Log.w(TAG, "avc decoder '${info.name}': capabilities unavailable", e)
+            }
+        }
+    }
+
+    /** A non-empty one-line reason for the session log: CodecException
+     * messages are empty on some devices; the diagnostics live in
+     * getDiagnosticInfo()/getErrorCode(). */
+    private fun describe(e: Exception): String {
+        if (e is MediaCodec.CodecException) {
+            return "CodecException code=${e.errorCode} diag=${e.diagnosticInfo}"
+        }
+        return e.message?.takeIf { it.isNotEmpty() } ?: e.javaClass.simpleName
     }
 
     /**
