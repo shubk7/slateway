@@ -6,4 +6,6 @@
     <string name="disconnect">Disconnect</string>
     <string name="pair">Pair (code %1$s)</string>
     <string name="port_hint">Host port</string>
+    <string name="fullscreen">Fullscreen</string>
+    <string name="exit_fullscreen">Exit fullscreen</string>
 </resources>
