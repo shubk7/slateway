@@ -187,18 +187,21 @@ class VideoDecoder {
             "no-csd" to buildFormat(null, null, lowLatency = false),
         )
         val failures = StringBuilder()
-        for ((label, format) in variants) {
-            if (tryOpen(null, format, label, failures)) return
-        }
-        for (info in avcDecoders()) {
-            for ((label, format) in variants) {
-                if (tryOpen(info.name, format, "${info.name} $label", failures)) return
+        val opened = variants.any { (label, format) -> tryOpen(null, format, label, failures) } ||
+            avcDecoders().any { info ->
+                variants.any { (label, format) ->
+                    tryOpen(info.name, format, "${info.name} $label", failures)
+                }
             }
-        }
-        if (!inventoryDumped) {
+        if (failures.isNotEmpty() && !inventoryDumped) {
+            // Some decoder/format combo was rejected (even if a later
+            // one opened): log the AVC inventory once so the next run
+            // says why — e.g. whether the hardware decoder even
+            // advertises the streamed resolution.
             inventoryDumped = true
             dumpAvcInventory()
         }
+        if (opened) return
         lastError = failures.toString().trimEnd(';', ' ')
         Log.e(TAG, "decoder open failed after every variant")
     }
