@@ -312,7 +312,29 @@ where
     let (input_tx, input_rx) = std::sync::mpsc::channel::<InputEvent>();
     let mut input_join: Option<std::thread::JoinHandle<InputCounters>> = None;
     if let Some(mut source) = video {
-        let mut started = match source.start() {
+        // The portal capture blocks inside its own one-shot runtime
+        // (consent dialog, D-Bus); the trait contract demands a
+        // dedicated OS thread, and block_on panics on an async worker
+        // (tokio: "Cannot start a runtime from within a runtime").
+        // spawn_blocking is that thread.
+        let start_result = match tokio::task::spawn_blocking(move || source.start()).await {
+            Ok(result) => result,
+            Err(join_err) => {
+                let _ = send_control(
+                    &mut session,
+                    CLOSE_TYPE,
+                    &Close {
+                        reason: CloseReason::Error as i32,
+                    }
+                    .encode_to_vec(),
+                )
+                .await;
+                return Err(SessionFailure::Video(format!(
+                    "video start task: {join_err}"
+                )));
+            }
+        };
+        let mut started = match start_result {
             Ok(started) => started,
             Err(err) => {
                 // The tablet is waiting; give it the orderly shutdown.

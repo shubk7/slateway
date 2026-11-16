@@ -332,6 +332,80 @@ async fn mirror_session_streams_decodable_keyframes() {
     );
 }
 
+/// Regression: the portal capture's `start` runs the portal dance on
+/// its own one-shot tokio runtime. Called on an async worker that is
+/// a hard panic ("Cannot start a runtime from within a runtime") —
+/// the session must move `VideoSource::start` onto a blocking thread
+/// (tokio::task::spawn_blocking), which this source provokes by
+/// doing exactly what PortalCapture::start does.
+struct PortalLikeSource;
+
+impl VideoSource for PortalLikeSource {
+    fn start(&mut self) -> Result<StartedVideo, String> {
+        let info = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| e.to_string())?
+            .block_on(async {
+                let mut source = SyntheticCapture { counter: 0 };
+                source.start(&CaptureConfig::default())
+            })
+            .map_err(|e| e.to_string())?;
+        let open: Box<EncoderOpener> =
+            Box::new(|config: &EncoderConfig| slateway_ffmpeg::start(config, &["libx264"]));
+        Ok(StartedVideo {
+            source: Box::new(SyntheticCapture { counter: 0 }),
+            config: EncoderConfig {
+                width: info.width,
+                height: info.height,
+                fps: info.fps,
+                bitrate_kbps: 0,
+            },
+            open_encoder: open,
+            injector: None,
+        })
+    }
+}
+
+/// The session must start the video source off the async runtime.
+#[tokio::test(flavor = "multi_thread")]
+async fn video_start_runs_off_the_async_runtime() {
+    let (_dir, known) = known_registry();
+    let host_priv = host_key();
+
+    let (a, b) = tokio::io::duplex(64 * 1024);
+    let server = tokio::spawn(async move {
+        let cfg = SessionConfig {
+            echo: false,
+            tick: Duration::from_millis(20),
+            input: false,
+        };
+        let confirm = |_code: &str, _device: &str| true;
+        serve_once(
+            a,
+            &host_priv,
+            &known,
+            &cfg,
+            &confirm,
+            Some(Box::new(PortalLikeSource)),
+        )
+        .await
+    });
+    let client_cfg = mock_tablet::VideoClientConfig {
+        frames: 3,
+        ..Default::default()
+    };
+    let client = mock_tablet::run_video_client(&client_cfg, b);
+    let (client_res, server_res) = tokio::join!(client, server);
+    let summary = client_res.unwrap_or_else(|err| panic!("client failed: {err}"));
+    let report = server_res
+        .unwrap_or_else(|err| panic!("server task failed (a start on the worker panics): {err:?}"))
+        .unwrap_or_else(|err| panic!("server failed: {err}"));
+    assert!(summary.first_frame_was_keyframe);
+    assert_eq!(summary.frames, 3);
+    let _ = report;
+}
+
 /// Reconnect after cable pull (docs/ROADMAP.md M1, host side): the
 /// same tablet key serves a second mirror session after the first
 /// ended — no re-pairing, and the stream opens with a fresh keyframe
