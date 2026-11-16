@@ -14,6 +14,14 @@ import android.view.Surface
  * low-latency keys where the device supports them (spike S4 verifies
  * the behaviour on Tab A7 and S6 Lite).
  *
+ * The codec opens at the first keyframe, not at Configure: the AU
+ * carries the parameter sets in-band (annexb), and vendor decoders
+ * (Exynos among them) want them as csd-0/csd-1 at configure time —
+ * the first keyframe is the earliest point both exist. After a decode
+ * error the codec re-opens the same way on the next keyframe: the
+ * host re-opens its encoder on the keyframe request, so the stream
+ * restarts with SPS/PPS + IDR and the picture returns on its own.
+ *
  * Threading: decode() runs on the connection's reader thread; the
  * SurfaceView owns the output Surface. AUs arrive one frame per
  * video-channel frame, keyframes flagged by the header.
@@ -24,13 +32,14 @@ class VideoDecoder {
     var lastDecodeUs: Long = 0
         private set
 
-    /** Access units queued and not yet decoded. */
+    /** AUs waiting for a Surface; replaced by the newest frame. */
     var queueDepth: Int = 0
         private set
 
     private var codec: MediaCodec? = null
     private var width: Int = 0
     private var height: Int = 0
+    private var surface: Surface? = null
 
     /** AUs waiting for a Surface; replaced by the newest frame. */
     private var pending: ByteArray? = null
@@ -47,42 +56,51 @@ class VideoDecoder {
     }
 
     /**
-     * (Re)configures the decoder for a new stream. Called on Configure
+     * (Re)configures the geometry for a new stream. Called on Configure
      * and on StreamStart. Releases any previous decoder first: the
-     * stream's first AU is a keyframe, so a fresh start is safe.
+     * stream's first AU is a keyframe, so a fresh start is safe. The
+     * codec itself opens at the first keyframe (see class doc).
      */
     fun configure(width: Int, height: Int, surface: Surface?) {
         release()
         this.width = width
         this.height = height
+        this.surface = surface
         if (surface == null) {
             // No display surface yet (the activity is not visible);
             // AUs queue newest-only until one shows up.
             Log.i(TAG, "decoder waiting for a surface")
-            return
         }
-        openCodec(surface)
     }
 
     /**
      * Feeds one access unit. Non-keyframes before the first keyframe
-     * are dropped (decoder not configured / mid-stream join). AUs
-     * replace each other newest-frame-wins while the codec is not
-     * ready or busy; nothing here blocks the reader thread.
+     * are dropped (decoder not configured / mid-stream join); the
+     * first keyframe after a configure or an error opens the codec
+     * with the AU's parameter sets. AUs replace each other
+     * newest-frame-wins while the codec is busy; nothing here blocks
+     * the reader thread.
      */
     fun decode(data: ByteArray, keyframe: Boolean) {
         val started = android.os.SystemClock.elapsedRealtimeNanos()
-        if (codec == null) {
-            if (!keyframe) {
-                // Nothing to sync to; skip until the IDR.
-                return
-            }
-            pending = data
-            pendingKeyframe = true
-            queueDepth = 1
-            return
-        }
         try {
+            if (codec == null) {
+                if (!keyframe) {
+                    // Nothing to sync to; skip until the IDR.
+                    return
+                }
+                val surface = this.surface ?: run {
+                    pending = data
+                    pendingKeyframe = true
+                    queueDepth = 1
+                    return
+                }
+                openCodec(surface, data)
+                // The AU that fed the reopen is consumed; a later
+                // attachSurface must not replay it.
+                pending = null
+                queueDepth = 0
+            }
             feed(data, keyframe)
         } catch (e: Exception) {
             // A bad AU or a stale codec must not kill the session; the
@@ -119,27 +137,41 @@ class VideoDecoder {
     /** The pending keyframe (if any) once a Surface exists. */
     fun attachSurface(surface: Surface) {
         val waiting = pending
+        val waitingKeyframe = pendingKeyframe
+        this.surface = surface
         release()
-        openCodec(surface)
-        if (waiting != null && codec != null) {
+        if (waiting != null) {
+            // Same path as decode(): open at the keyframe with its
+            // parameter sets, then feed it.
             try {
-                feed(waiting, pendingKeyframe)
+                openCodec(surface, waiting)
+                feed(waiting, waitingKeyframe)
             } catch (e: Exception) {
                 lastError = e.message ?: e.javaClass.simpleName
                 Log.w(TAG, "queued keyframe decode failed", e)
+                release()
             }
         }
         pending = null
         queueDepth = 0
     }
 
-    private fun openCodec(surface: Surface) {
+    /**
+     * Configures the decoder with the parameter sets found in the
+     * keyframe AU (csd-0 = SPS, csd-1 = PPS, the AVC convention). AUs
+     * without them still open: in-band parameter sets cover the
+     * decoders that accept them.
+     */
+    private fun openCodec(surface: Surface, keyframeAu: ByteArray) {
         val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height)
         if (android.os.Build.VERSION.SDK_INT >= 30) {
             // Latency keys vary per codec; verify on the reference
             // devices (spike S4) before relying on them.
             format.setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
         }
+        val (sps, pps) = parameterSets(keyframeAu)
+        sps?.let { format.setByteBuffer("csd-0", java.nio.ByteBuffer.wrap(it)) }
+        pps?.let { format.setByteBuffer("csd-1", java.nio.ByteBuffer.wrap(it)) }
         try {
             val newCodec = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
             newCodec.configure(format, surface, null, 0)
@@ -198,4 +230,56 @@ class VideoDecoder {
     private companion object {
         const val TAG = "slateway-video"
     }
+}
+
+/**
+ * The annexb parameter sets of one access unit: SPS and PPS bytes
+ * (start codes included) as a pair, each null when absent. Encoders
+ * prepend SPS/PPS to IDR access units; P-frames carry neither.
+ *
+ * Annexb: NALs separated by start codes of three (`00 00 01`) or four
+ * (`00 00 00 01`) bytes. A NAL's type is the low five bits of its
+ * first byte; 7 is SPS, 8 is PPS. A NAL spans from its start code to
+ * the next start code's first byte (the trailing zeros before a
+ * four-byte start code stay with the following NAL).
+ */
+internal fun parameterSets(au: ByteArray): Pair<ByteArray?, ByteArray?> {
+    // Start codes as (codeStart, codeLen) pairs; the payload begins
+    // at codeStart + codeLen.
+    val codeStarts = ArrayList<Int>(4)
+    val codeLens = ArrayList<Int>(4)
+    var i = 0
+    while (i < au.size - 2) {
+        if (au[i].toInt() == 0 && au[i + 1].toInt() == 0 && au[i + 2].toInt() == 1) {
+            codeStarts.add(i)
+            codeLens.add(3)
+            i += 3
+        } else if (
+            i < au.size - 3 &&
+            au[i].toInt() == 0 &&
+            au[i + 1].toInt() == 0 &&
+            au[i + 2].toInt() == 0 &&
+            au[i + 3].toInt() == 1
+        ) {
+            codeStarts.add(i)
+            codeLens.add(4)
+            i += 4
+        } else {
+            i++
+        }
+    }
+    var sps: ByteArray? = null
+    var pps: ByteArray? = null
+    for (j in codeStarts.indices) {
+        val payloadAt = codeStarts[j] + codeLens[j]
+        val type = au[payloadAt].toInt() and 0x1f
+        if (type != 7 && type != 8) continue
+        // Up to the next start code, or the end of the AU. Annexb
+        // trailing zero bytes are ambiguous; leaving them on the final
+        // NAL is safe: parsers stop at the RBSP stop bit.
+        val end = if (j + 1 < codeStarts.size) codeStarts[j + 1] else au.size
+        val nal = au.copyOfRange(codeStarts[j], end)
+        if (type == 7) sps = nal else pps = nal
+    }
+    return Pair(sps, pps)
 }

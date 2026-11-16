@@ -70,9 +70,14 @@ pub fn pump(
     keyframe_req: Arc<AtomicBool>,
 ) -> PumpCounters {
     let counters = PumpCounters::default();
+    let open_started = std::time::Instant::now();
     let mut encoder = match (started.open_encoder)(&started.config) {
         Ok((encoder, info)) => {
-            eprintln!("video: encoding with {}", info.codec);
+            eprintln!(
+                "video: encoding with {} (open {} ms)",
+                info.codec,
+                open_started.elapsed().as_millis()
+            );
             encoder
         }
         Err(err) => {

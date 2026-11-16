@@ -344,7 +344,11 @@ class ConnectionService : Service() {
                                         // error; ask the host for a fresh
                                         // IDR (docs/PROTOCOL.md, "Video
                                         // session flow").
-                                        Log.w(tag, "video: decode error, requesting keyframe")
+                                        Log.w(
+                                            tag,
+                                            "video: decode error (${decoder.lastError}), " +
+                                                "requesting keyframe",
+                                        )
                                         decoder.clearError()
                                         channel.writeFrame(
                                             output,
