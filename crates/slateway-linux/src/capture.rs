@@ -176,15 +176,31 @@ async fn request_portal(config: &CaptureConfig) -> Result<PortalResult, CaptureE
     }
 }
 
+/// A fresh session-bus connection for one portal dance.
+///
+/// ashpd's default proxies share a process-global cached connection
+/// (`ashpd::proxy::Proxy::connection`, a `OnceLock`) built on the
+/// runtime of the first dance. zbus binds a connection to the runtime
+/// it was built on, so a second dance in the same process (tablet
+/// reconnect) would reuse a connection whose runtime is gone and fail
+/// every call. One dance, one connection, owned by the dance's
+/// runtime lifetime.
+async fn dance_connection() -> Result<ashpd::zbus::Connection, CaptureError> {
+    ashpd::zbus::Connection::session()
+        .await
+        .map_err(|e| CaptureError::Setup(format!("session bus: {e}")))
+}
+
 async fn request_remote_desktop(config: &CaptureConfig) -> Result<PortalResult, CaptureError> {
     use ashpd::desktop::{
         remote_desktop::{DeviceType, RemoteDesktop, SelectDevicesOptions},
         screencast::SelectSourcesOptions,
     };
-    let desktop = RemoteDesktop::new()
+    let connection = dance_connection().await?;
+    let desktop = RemoteDesktop::with_connection(connection.clone())
         .await
         .map_err(|e| CaptureError::Setup(format!("remote desktop portal: {e}")))?;
-    let cast = Screencast::new()
+    let cast = Screencast::with_connection(connection)
         .await
         .map_err(|e| CaptureError::Setup(format!("screencast portal: {e}")))?;
     let session = desktop
@@ -246,6 +262,9 @@ async fn request_remote_desktop(config: &CaptureConfig) -> Result<PortalResult, 
             width: width.max(0) as u32,
             height: height.max(0) as u32,
         },
+        // `PortalCapture::start` attaches the dance runtime after the
+        // dance completes (zbus binds the connection to it).
+        runtime: None,
     };
     Ok(PortalResult {
         stream: PortalStream {
@@ -259,7 +278,8 @@ async fn request_remote_desktop(config: &CaptureConfig) -> Result<PortalResult, 
 }
 
 async fn request_portal_stream(config: &CaptureConfig) -> Result<PortalStream, CaptureError> {
-    let proxy = Screencast::new()
+    let connection = dance_connection().await?;
+    let proxy = Screencast::with_connection(connection)
         .await
         .map_err(|e| CaptureError::Setup(format!("screencast portal: {e}")))?;
     let session = proxy
@@ -559,11 +579,22 @@ impl CaptureSource for PortalCapture {
         // `tokio::runtime::Builder::block_on` panics if called from
         // inside a runtime; the trait contract keeps this off the async
         // threads (ARCHITECTURE.md: dedicated OS thread for capture).
-        let result = tokio::runtime::Builder::new_current_thread()
+        let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .map_err(|e| CaptureError::Unsupported(format!("no tokio runtime: {e}")))?
-            .block_on(request_portal(config))?;
+            .map_err(|e| CaptureError::Unsupported(format!("no tokio runtime: {e}")))?;
+        let result = runtime.block_on(request_portal(config))?;
+        // ashpd builds zbus connections with the tokio backend, and
+        // zbus binds a connection to the runtime it was created on:
+        // dropping the dance runtime would kill the portal session
+        // proxies, and every later notify call would fail with
+        // "i/o error" (seen on hardware: injection granted at setup,
+        // the first touch dead). The input handle keeps the runtime
+        // alive for its lifetime.
+        let mut result = result;
+        if let Some(handle) = result.input.as_mut() {
+            handle.runtime = Some(runtime);
+        }
         let portal = result.stream;
         self.input = result.input;
 
