@@ -182,12 +182,19 @@ class VideoDecoder {
      *
      * A configure rejection carries no readable message on some
      * devices (CodecException with an empty message), so the open
-     * ladders through format variants (no low-latency key, no csd)
-     * and then through every AVC decoder on the device by name — the
-     * default pick of createDecoderByType need not be the one that
-     * accepts the panel's resolution. If everything fails, the AVC
-     * decoder inventory with per-size support is logged once so the
-     * next session pinpoints the rejected key or dimension.
+     * ladders through every AVC decoder on the device by name, in the
+     * platform's REGULAR_CODECS order (createDecoderByType picks the
+     * first entry, so the platform default is tried first). The format
+     * variants are ordered by the decoder's hardware acceleration:
+     * hardware decoders get the low-latency key first (the desirable
+     * mode, verified on the reference devices), software decoders get
+     * plain csd first — on Tab A7 the software c2 decoder opened with
+     * KEY_LOW_LATENCY freezes on the last access unit until the next
+     * one arrives (the mirror freezes on click), so the A/B test opens
+     * software decoders without the key (docs/TESTING.md, "Hardware
+     * decode"). If everything fails, the AVC decoder inventory with
+     * per-size support is logged once so the next session pinpoints
+     * the rejected key or dimension.
      */
     private fun openCodec(surface: Surface, keyframeAu: ByteArray) {
         val (sps, pps) = parameterSets(keyframeAu)
@@ -196,18 +203,12 @@ class VideoDecoder {
             surfaceDiagnosticDone = true
             diagnoseHardwareNoSurface(sps, pps)
         }
-        val variants = linkedMapOf(
-            "csd+low-latency" to buildFormat(sps, pps, lowLatency = true),
-            "csd" to buildFormat(sps, pps, lowLatency = false),
-            "no-csd" to buildFormat(null, null, lowLatency = false),
-        )
         val failures = StringBuilder()
-        val opened = variants.any { (label, format) -> tryOpen(null, format, label, failures) } ||
-            avcDecoders().any { info ->
-                variants.any { (label, format) ->
-                    tryOpen(info.name, format, "${info.name} $label", failures)
-                }
+        val opened = avcDecoders().any { info ->
+            variantsFor(info.isHardwareAccelerated, sps, pps).any { (label, format) ->
+                tryOpen(info.name, format, "${info.name} $label", failures)
             }
+        }
         if (failures.isNotEmpty() && !inventoryDumped) {
             // Some decoder/format combo was rejected (even if a later
             // one opened): log the AVC inventory once so the next run
@@ -219,6 +220,27 @@ class VideoDecoder {
         if (opened) return
         lastError = failures.toString().trimEnd(';', ' ')
         Log.e(TAG, "decoder open failed after every variant")
+    }
+
+    /**
+     * Format variants for one decoder, in the open order. Hardware
+     * decoders: csd with the low-latency key first. Software decoders:
+     * plain csd first — the A/B test for the Tab A7 freeze (the class
+     * doc, "software decoders get plain csd first").
+     */
+    private fun variantsFor(
+        hardware: Boolean,
+        sps: ByteArray?,
+        pps: ByteArray?,
+    ): Map<String, MediaFormat> {
+        val csdLowLatency = "csd+low-latency" to buildFormat(sps, pps, lowLatency = true)
+        val csd = "csd" to buildFormat(sps, pps, lowLatency = false)
+        val noCsd = "no-csd" to buildFormat(null, null, lowLatency = false)
+        return if (hardware) {
+            linkedMapOf(csdLowLatency, csd, noCsd)
+        } else {
+            linkedMapOf(csd, csdLowLatency, noCsd)
+        }
     }
 
     private fun buildFormat(sps: ByteArray?, pps: ByteArray?, lowLatency: Boolean): MediaFormat {
@@ -234,21 +256,16 @@ class VideoDecoder {
     }
 
     /** Creates, configures and starts one candidate; releases it on
-     * failure and records a one-line reason. `name == null` picks the
-     * platform default (createDecoderByType). */
+     * failure and records a one-line reason. */
     private fun tryOpen(
-        name: String?,
+        name: String,
         format: MediaFormat,
         label: String,
         failures: StringBuilder,
     ): Boolean {
         var candidate: MediaCodec? = null
         try {
-            candidate = if (name == null) {
-                MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
-            } else {
-                MediaCodec.createByCodecName(name)
-            }
+            candidate = MediaCodec.createByCodecName(name)
             candidate.configure(format, surface, null, 0)
             candidate.start()
             codec = candidate

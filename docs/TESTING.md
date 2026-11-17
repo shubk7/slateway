@@ -94,9 +94,21 @@ only, never frame or input content (docs/SECURITY.md):
 
 ## Hardware decode
 
-The decoder opens with a ladder (format variants, then every AVC
-decoder by name) and dumps the AVC capability inventory once on any
-rejection. On Tab A7 (SM-T505, Android 14) `OMX.qcom.video.decoder.avc`
+The decoder opens with a ladder through every AVC decoder on the
+device by name, in the platform's REGULAR_CODECS order (the platform
+default is the first entry), and dumps the AVC capability inventory
+once on any rejection. The format variants are ordered by the
+decoder's hardware acceleration: hardware decoders try
+`csd+low-latency` first (the desirable mode, spike S4); software
+decoders try plain `csd` first — the A/B test for the Tab A7 freeze,
+whose software `c2.android.avc.decoder` opened with `KEY_LOW_LATENCY`
+and is suspected to hold the last access unit unrendered until the
+next one arrives ("frozen until I touch"). Collect on the next A7
+run: whether the freeze changes with the reordered ladder, and
+whether the tablet watchdog reports >0 frames that never appear on
+screen (decoder-held frame) vs 0 (host-side).
+
+On Tab A7 (SM-T505, Android 14) `OMX.qcom.video.decoder.avc`
 advertises 1920x1200 yet rejects configure with `CodecException
 code=-1010 diag=…error_neg_1010` in every format variant, while
 `c2.android.avc.decoder` (software) opens and decodes — the current
@@ -112,4 +124,22 @@ without a surface too, so the surface is not the cause. Log lines:
 
 ## Results log
 
-(none yet)
+- 2026-11-16 · commit 402dffc · Tab A7 (SM-T505) · Linux host: fullscreen
+  toggle verified working by the maintainer; touch-as-pointer verified
+  (clicks land where touched). Open issues: mirror freezes on the tablet
+  after each click until the next touch; lag and ghosting (tablet runs the
+  software `c2.android.avc.decoder`; `OMX.qcom.video.decoder.avc` rejects
+  configure with `error_neg_1010` in every format variant).
+- 2026-11-17 · commits 72a61d3/ea0fe3e · Tab A7 (SM-T505) · Linux host:
+  instrumented run. Pipeline clean end to end: capture `callbacks ==
+  published == encoded`, no skips, no errors, no backpressure; the
+  tablet's 1 s watchdog tracked the host's encode counts exactly. Freeze
+  windows showed the compositor delivering 0 buffers for ~40 s with the
+  capture loop provably alive (heartbeats kept printing); each click
+  produced only ~2–3 frames (the cursor-jump repaint). Injection healthy
+  (0.7–1.5 ms per notify; no hung portal calls). Decoder diagnostic: qcom
+  -1010 fails WITHOUT the surface too — the surface is not the cause.
+- 2026-11-17 · Tab S6 (model TBC) · Linux host: maintainer report — no
+  stutters, no lag, no ghosting, touch input works well. Pending: device
+  model, the session's decoder-open logcat (hardware decode
+  confirmation), and whether the click freeze reproduced at all.
