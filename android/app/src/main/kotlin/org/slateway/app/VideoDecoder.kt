@@ -283,49 +283,57 @@ class VideoDecoder {
     /**
      * Hardware-decode spike evidence (docs/TESTING.md, "Hardware
      * decode"): a hardware decoder whose capability matrix advertises
-     * the streamed size still rejects configure with -1010 when the
-     * surface is passed. This probe configures every hardware AVC
-     * decoder WITHOUT the surface (ByteBuffer output, flexible color
-     * format, csd when the keyframe carried parameter sets) and
-     * releases it immediately — evidence only, never used for
-     * decoding. An open without the surface pins the rejection on the
-     * surface input; a failure with the same code points at the
-     * format or size instead.
+     * the streamed size still rejects configure with -1010, with or
+     * without the surface (the 2026-11-17 diagnostic: the same code
+     * without a surface). This probe configures every hardware AVC
+     * decoder WITHOUT the surface at several sizes — the streamed one
+     * first, then two common fallbacks — and releases each candidate
+     * immediately; evidence only, never used for decoding. Opens at
+     * smaller sizes pin the rejection on the streamed size; failures
+     * everywhere point at a device quirk in the decoder itself.
      */
     private fun diagnoseHardwareNoSurface(sps: ByteArray?, pps: ByteArray?) {
+        val sizes = linkedSetOf(width to height, 1920 to 1080, 1280 to 720)
         for (info in avcDecoders().filter { it.isHardwareAccelerated }) {
-            var candidate: MediaCodec? = null
-            try {
-                val format =
-                    MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height)
-                sps?.let { format.setByteBuffer("csd-0", java.nio.ByteBuffer.wrap(it)) }
-                pps?.let { format.setByteBuffer("csd-1", java.nio.ByteBuffer.wrap(it)) }
-                format.setInteger(
-                    MediaFormat.KEY_COLOR_FORMAT,
-                    MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible,
-                )
-                candidate = MediaCodec.createByCodecName(info.name)
-                candidate.configure(format, null, null, 0)
-                candidate.start()
-                Log.w(
-                    TAG,
-                    "decoder diagnostic: '${info.name}' opens WITHOUT surface at ${width}x$height " +
-                        "(surface input is the rejection cause)",
-                )
-            } catch (e: Exception) {
-                Log.w(
-                    TAG,
-                    "decoder diagnostic: '${info.name}' fails without surface too: ${describe(e)}",
-                )
-            } finally {
-                candidate?.let { c ->
-                    try {
-                        c.stop()
-                    } catch (_: IllegalStateException) {}
-                    try {
-                        c.release()
-                    } catch (releaseFailed: Exception) {
-                        Log.w(TAG, "codec release after the diagnostic failed", releaseFailed)
+            for ((probeWidth, probeHeight) in sizes) {
+                var candidate: MediaCodec? = null
+                try {
+                    val format =
+                        MediaFormat.createVideoFormat(
+                            MediaFormat.MIMETYPE_VIDEO_AVC,
+                            probeWidth,
+                            probeHeight,
+                        )
+                    sps?.let { format.setByteBuffer("csd-0", java.nio.ByteBuffer.wrap(it)) }
+                    pps?.let { format.setByteBuffer("csd-1", java.nio.ByteBuffer.wrap(it)) }
+                    format.setInteger(
+                        MediaFormat.KEY_COLOR_FORMAT,
+                        MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible,
+                    )
+                    candidate = MediaCodec.createByCodecName(info.name)
+                    candidate.configure(format, null, null, 0)
+                    candidate.start()
+                    Log.w(
+                        TAG,
+                        "decoder diagnostic: '${info.name}' opens WITHOUT surface at " +
+                            "${probeWidth}x$probeHeight",
+                    )
+                } catch (e: Exception) {
+                    Log.w(
+                        TAG,
+                        "decoder diagnostic: '${info.name}' fails without surface at " +
+                            "${probeWidth}x$probeHeight too: ${describe(e)}",
+                    )
+                } finally {
+                    candidate?.let { c ->
+                        try {
+                            c.stop()
+                        } catch (_: IllegalStateException) {}
+                        try {
+                            c.release()
+                        } catch (releaseFailed: Exception) {
+                            Log.w(TAG, "codec release after the diagnostic failed", releaseFailed)
+                        }
                     }
                 }
             }

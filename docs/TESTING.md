@@ -72,10 +72,14 @@ heartbeats name the stage that stopped; log lines carry counters
 only, never frame or input content (docs/SECURITY.md):
 
 - Host, every 2 s — `video: capture 2s: callbacks=… published=…
-  nodata=… badchunk=… mismatch=…` (PipeWire worker): zero callbacks
-  while the desktop visibly changes means the compositor delivered
-  nothing; nonzero `nodata`/`badchunk`/`mismatch` with low
-  `published` means the worker skipped frames.
+  nobuf=… nodata=… badchunk=… mismatch=…` (PipeWire worker): zero
+  callbacks while the desktop visibly changes means the compositor
+  delivered nothing; nonzero `nobuf` means process fired but no
+  buffer could be dequeued (producer pool empty); nonzero
+  `nodata`/`badchunk`/`mismatch` with low `published` means the
+  worker skipped frames. (2026-11-17 run: the freeze showed
+  `callbacks=0` for ~40 s with the loop provably alive — the
+  compositor stopped delivering buffers.)
 - Host, every 2 s — `video: encode 2s: encoded=… skipped=… errs=…
   total=…` (pump): capture publishing while `encoded` stays 0 puts
   the stall at or after the encoder.
@@ -99,10 +103,12 @@ code=-1010 diag=…error_neg_1010` in every format variant, while
 source of mirror lag/ghosting. One probe runs per decoder instance to
 narrow the cause: it configures every hardware AVC decoder WITHOUT
 the surface (ByteBuffer output, `COLOR_FormatYUV420Flexible`,
-csd from the keyframe) and releases it. "opens WITHOUT surface"
-pins the rejection on surface input; "fails without surface too"
-points at the format or size. Log lines: `decoder diagnostic: '<name>'
-…`.
+csd from the keyframe) at the streamed size and at two smaller
+fallbacks (1920x1080, 1280x720), releasing each candidate. Opens at
+smaller sizes pin the rejection on the streamed size; failures
+everywhere point at a device quirk. 2026-11-17: the probe fails
+without a surface too, so the surface is not the cause. Log lines:
+`decoder diagnostic: '<name>' …`.
 
 ## Results log
 

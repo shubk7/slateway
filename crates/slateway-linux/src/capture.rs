@@ -152,6 +152,9 @@ struct ListenerData {
 struct WorkerCounters {
     /// Process invocations that dequeued a buffer at all.
     callbacks: AtomicU64,
+    /// Process invocations where no buffer could be dequeued (the
+    /// producer's pool was empty or in flight).
+    no_buffer: AtomicU64,
     /// Frames published to the consumer (newest-frame-wins).
     published: AtomicU64,
     /// Buffers without mappable data (DMA-BUF-only) — skipped.
@@ -518,6 +521,7 @@ fn run_worker(portal: PortalStream, shared: Arc<Shared>, max_fps: u32) {
         })
         .process(|stream, data| {
             let Some(mut buffer) = stream.dequeue_buffer() else {
+                data.counters.no_buffer.fetch_add(1, Ordering::Relaxed);
                 return;
             };
             data.counters.callbacks.fetch_add(1, Ordering::Relaxed);
@@ -594,9 +598,10 @@ fn run_worker(portal: PortalStream, shared: Arc<Shared>, max_fps: u32) {
         if Instant::now() >= next_heartbeat {
             next_heartbeat = Instant::now() + HEARTBEAT;
             eprintln!(
-                "video: capture 2s: callbacks={} published={} nodata={} badchunk={} mismatch={}",
+                "video: capture 2s: callbacks={} published={} nobuf={} nodata={} badchunk={} mismatch={}",
                 counters.callbacks.swap(0, Ordering::Relaxed),
                 counters.published.swap(0, Ordering::Relaxed),
+                counters.no_buffer.swap(0, Ordering::Relaxed),
                 counters.no_data.swap(0, Ordering::Relaxed),
                 counters.corrupted.swap(0, Ordering::Relaxed),
                 counters.inconsistent.swap(0, Ordering::Relaxed),
