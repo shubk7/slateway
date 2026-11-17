@@ -14,7 +14,10 @@
 
 use std::{
     os::fd::OwnedFd,
-    sync::{Arc, Condvar, Mutex},
+    sync::{
+        Arc, Condvar, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     thread::JoinHandle,
     time::{Duration, Instant},
 };
@@ -45,6 +48,10 @@ use slateway_platform::capture::{
 
 /// A consent prompt, negotiation or teardown must finish inside this.
 const START_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Frame-flow heartbeat cadence (docs/TESTING.md, "Frame-flow
+/// heartbeats").
+const HEARTBEAT: Duration = Duration::from_secs(2);
 
 enum WorkerState {
     /// Worker spawned, format not yet negotiated.
@@ -132,6 +139,27 @@ struct ListenerData {
     shared: Arc<Shared>,
     format: VideoInfoRaw,
     max_fps: u32,
+    counters: Arc<WorkerCounters>,
+}
+
+/// Where the frames stop, counted per stage (docs/TESTING.md,
+/// "Frame-flow heartbeats"): during a mirror freeze these numbers say
+/// whether the compositor stopped delivering buffers, the worker
+/// skipped them silently, or they all reached the consumer. The
+/// dispatch loop reports and resets them every heartbeat; only
+/// counts ride the log — never frame content (docs/SECURITY.md).
+#[derive(Default)]
+struct WorkerCounters {
+    /// Process invocations that dequeued a buffer at all.
+    callbacks: AtomicU64,
+    /// Frames published to the consumer (newest-frame-wins).
+    published: AtomicU64,
+    /// Buffers without mappable data (DMA-BUF-only) — skipped.
+    no_data: AtomicU64,
+    /// Buffers with an empty or corrupted chunk — skipped.
+    corrupted: AtomicU64,
+    /// Buffers failing the geometry consistency check — skipped.
+    inconsistent: AtomicU64,
 }
 
 #[derive(Default)]
@@ -419,10 +447,12 @@ fn run_worker(portal: PortalStream, shared: Arc<Shared>, max_fps: u32) {
         Err(e) => return shared.set(WorkerState::Error(format!("pipewire stream: {e}"))),
     };
 
+    let counters = Arc::new(WorkerCounters::default());
     let data = ListenerData {
         shared: Arc::clone(&shared),
         format: VideoInfoRaw::default(),
         max_fps,
+        counters: Arc::clone(&counters),
     };
 
     let values = match enum_format_pod(
@@ -490,14 +520,17 @@ fn run_worker(portal: PortalStream, shared: Arc<Shared>, max_fps: u32) {
             let Some(mut buffer) = stream.dequeue_buffer() else {
                 return;
             };
+            data.counters.callbacks.fetch_add(1, Ordering::Relaxed);
             let datas = buffer.datas_mut();
             if datas.is_empty() {
+                data.counters.corrupted.fetch_add(1, Ordering::Relaxed);
                 return;
             }
             let plane = &mut datas[0];
             let (chunk_size, chunk_stride) = {
                 let chunk = plane.chunk();
                 if chunk.size() == 0 || chunk.flags().contains(ChunkFlags::CORRUPTED) {
+                    data.counters.corrupted.fetch_add(1, Ordering::Relaxed);
                     return;
                 }
                 (
@@ -509,6 +542,7 @@ fn run_worker(portal: PortalStream, shared: Arc<Shared>, max_fps: u32) {
             // DMA-BUF-only buffers, which the zero-copy encoder path
             // will consume directly. We skip those frames for now.
             let Some(pixels) = plane.data() else {
+                data.counters.no_data.fetch_add(1, Ordering::Relaxed);
                 return;
             };
             let relevant = pixels.len().min(chunk_size);
@@ -525,7 +559,10 @@ fn run_worker(portal: PortalStream, shared: Arc<Shared>, max_fps: u32) {
                 pts_us: monotonic_us(),
             };
             if frame.is_consistent() {
+                data.counters.published.fetch_add(1, Ordering::Relaxed);
                 data.shared.publish(frame);
+            } else {
+                data.counters.inconsistent.fetch_add(1, Ordering::Relaxed);
             }
         })
         .register()
@@ -549,10 +586,22 @@ fn run_worker(portal: PortalStream, shared: Arc<Shared>, max_fps: u32) {
     // Dispatch until stop or failure; `iterate` gives us the idle-time
     // exit condition that `run()` cannot (a static screen produces no
     // callbacks to quit from).
+    let mut next_heartbeat = Instant::now() + HEARTBEAT;
     while matches!(
         shared.snapshot(),
         WorkerState::Connecting | WorkerState::Running(_)
     ) {
+        if Instant::now() >= next_heartbeat {
+            next_heartbeat = Instant::now() + HEARTBEAT;
+            eprintln!(
+                "video: capture 2s: callbacks={} published={} nodata={} badchunk={} mismatch={}",
+                counters.callbacks.swap(0, Ordering::Relaxed),
+                counters.published.swap(0, Ordering::Relaxed),
+                counters.no_data.swap(0, Ordering::Relaxed),
+                counters.corrupted.swap(0, Ordering::Relaxed),
+                counters.inconsistent.swap(0, Ordering::Relaxed),
+            );
+        }
         main_loop
             .loop_()
             .iterate(pw::loop_::Timeout::Finite(Duration::from_millis(200)));

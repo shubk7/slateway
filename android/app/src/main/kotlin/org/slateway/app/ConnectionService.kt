@@ -276,6 +276,26 @@ class ConnectionService : Service() {
                         newSender.start()
                         Log.i(tag, "input: touch-as-pointer enabled (host accepted input)")
                     }
+                    // Frame-flow watchdog (docs/TESTING.md, "Frame-flow
+                    // heartbeats"): logs the decode cadence every second
+                    // even while this thread is blocked in readFrame —
+                    // during a freeze it says whether AUs still arrive
+                    // at all.
+                    val watchdog = Thread({
+                        var last = 0L
+                        while (true) {
+                            try {
+                                Thread.sleep(1000)
+                            } catch (_: InterruptedException) {
+                                break
+                            }
+                            val total = decoder.framesSeen.get()
+                            Log.i(tag, "video: ${total - last} frames in the last 1 s (total $total)")
+                            last = total
+                        }
+                    }, "slateway-video-watchdog")
+                    watchdog.isDaemon = true
+                    watchdog.start()
                     var pongs = 0
                     var frames = 0L
                     var keyframes = 0L
@@ -365,10 +385,12 @@ class ConnectionService : Service() {
                             }
                         }
                     } finally {
-                        // Stop the touch sender before the channel
-                        // dies so no batch races the close.
+                        // Stop the touch sender and the watchdog
+                        // before the channel dies so no batch races
+                        // the close.
                         sender?.stop()
                         inputSender = null
+                        watchdog.interrupt()
                         decoder.release()
                         videoDecoder = null
                     }

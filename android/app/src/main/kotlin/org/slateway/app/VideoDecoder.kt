@@ -38,6 +38,12 @@ class VideoDecoder {
     var queueDepth: Int = 0
         private set
 
+    /** Total AUs handed to [decode] since this decoder exists; the
+     * session watchdog reports its 1 s cadence (docs/TESTING.md,
+     * "Frame-flow heartbeats"). Atomic: the reader thread writes it,
+     * the watchdog thread reads it. */
+    val framesSeen = java.util.concurrent.atomic.AtomicLong()
+
     private var codec: MediaCodec? = null
     private var width: Int = 0
     private var height: Int = 0
@@ -51,6 +57,10 @@ class VideoDecoder {
     /** AUs waiting for a Surface; replaced by the newest frame. */
     private var pending: ByteArray? = null
     private var pendingKeyframe = false
+
+    /** The no-surface hardware-decoder diagnostic runs once per
+     * decoder instance. */
+    private var surfaceDiagnosticDone = false
 
     /** Latest decoder error for the session log; the stream resyncs on
      * RequestKeyframe. */
@@ -89,6 +99,7 @@ class VideoDecoder {
      * the reader thread.
      */
     fun decode(data: ByteArray, keyframe: Boolean) {
+        framesSeen.incrementAndGet()
         val started = android.os.SystemClock.elapsedRealtimeNanos()
         try {
             if (codec == null) {
@@ -181,6 +192,10 @@ class VideoDecoder {
     private fun openCodec(surface: Surface, keyframeAu: ByteArray) {
         val (sps, pps) = parameterSets(keyframeAu)
         Log.i(TAG, "decoder open ${width}x${height}: csd sps=${sps?.size ?: -1} B, pps=${pps?.size ?: -1} B")
+        if (!surfaceDiagnosticDone) {
+            surfaceDiagnosticDone = true
+            diagnoseHardwareNoSurface(sps, pps)
+        }
         val variants = linkedMapOf(
             "csd+low-latency" to buildFormat(sps, pps, lowLatency = true),
             "csd" to buildFormat(sps, pps, lowLatency = false),
@@ -265,6 +280,58 @@ class VideoDecoder {
         }
     }
 
+    /**
+     * Hardware-decode spike evidence (docs/TESTING.md, "Hardware
+     * decode"): a hardware decoder whose capability matrix advertises
+     * the streamed size still rejects configure with -1010 when the
+     * surface is passed. This probe configures every hardware AVC
+     * decoder WITHOUT the surface (ByteBuffer output, flexible color
+     * format, csd when the keyframe carried parameter sets) and
+     * releases it immediately — evidence only, never used for
+     * decoding. An open without the surface pins the rejection on the
+     * surface input; a failure with the same code points at the
+     * format or size instead.
+     */
+    private fun diagnoseHardwareNoSurface(sps: ByteArray?, pps: ByteArray?) {
+        for (info in avcDecoders().filter { it.isHardwareAccelerated }) {
+            var candidate: MediaCodec? = null
+            try {
+                val format =
+                    MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height)
+                sps?.let { format.setByteBuffer("csd-0", java.nio.ByteBuffer.wrap(it)) }
+                pps?.let { format.setByteBuffer("csd-1", java.nio.ByteBuffer.wrap(it)) }
+                format.setInteger(
+                    MediaFormat.KEY_COLOR_FORMAT,
+                    MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible,
+                )
+                candidate = MediaCodec.createByCodecName(info.name)
+                candidate.configure(format, null, null, 0)
+                candidate.start()
+                Log.w(
+                    TAG,
+                    "decoder diagnostic: '${info.name}' opens WITHOUT surface at ${width}x$height " +
+                        "(surface input is the rejection cause)",
+                )
+            } catch (e: Exception) {
+                Log.w(
+                    TAG,
+                    "decoder diagnostic: '${info.name}' fails without surface too: ${describe(e)}",
+                )
+            } finally {
+                candidate?.let { c ->
+                    try {
+                        c.stop()
+                    } catch (_: IllegalStateException) {}
+                    try {
+                        c.release()
+                    } catch (releaseFailed: Exception) {
+                        Log.w(TAG, "codec release after the diagnostic failed", releaseFailed)
+                    }
+                }
+            }
+        }
+    }
+
     /** One line per AVC decoder: does it advertise the size at all? */
     private fun dumpAvcInventory() {
         for (info in avcDecoders()) {
@@ -273,7 +340,7 @@ class VideoDecoder {
                     .getVideoCapabilities()
                 Log.w(
                     TAG,
-                    "avc decoder '${info.name}': ${width}x$height supported=" +
+                    "avc decoder '${info.name}' hw=${info.isHardwareAccelerated}: ${width}x$height supported=" +
                         "${caps.isSizeSupported(width, height)}, widths=${caps.supportedWidths}, " +
                         "heights=${caps.supportedHeights}, align=${caps.widthAlignment}x${caps.heightAlignment}",
                 )

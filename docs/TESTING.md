@@ -62,6 +62,48 @@ tablets (spike S4, M1 exit criteria):
   session) and no stuck pointer buttons after the pull.
 - Record results with date and commit in the results log.
 
+## Frame-flow heartbeats (freeze diagnosis)
+
+The mirror pipeline has three places where frames can silently stop:
+the compositor (damage-based delivery — a static screen legitimately
+produces nothing), the capture worker (buffers skipped for
+DMA-BUF/corruption/geometry), and the pump (blocked or wedged). The
+heartbeats name the stage that stopped; log lines carry counters
+only, never frame or input content (docs/SECURITY.md):
+
+- Host, every 2 s — `video: capture 2s: callbacks=… published=…
+  nodata=… badchunk=… mismatch=…` (PipeWire worker): zero callbacks
+  while the desktop visibly changes means the compositor delivered
+  nothing; nonzero `nodata`/`badchunk`/`mismatch` with low
+  `published` means the worker skipped frames.
+- Host, every 2 s — `video: encode 2s: encoded=… skipped=… errs=…
+  total=…` (pump): capture publishing while `encoded` stays 0 puts
+  the stall at or after the encoder.
+- Host, per injection — `input: Down motion=… press=… us`,
+  `input: Up release=… us`, and a 1 s `input: moves=… max=… us`
+  heartbeat: a notify round trip that hangs shows up as a missing or
+  huge-duration line.
+- Tablet, every 1 s — `video: N frames in the last 1 s (total M)`
+  (watchdog thread): runs even while the reader thread is blocked in
+  readFrame, so it distinguishes "host stopped sending" from
+  "tablet stopped decoding".
+
+## Hardware decode
+
+The decoder opens with a ladder (format variants, then every AVC
+decoder by name) and dumps the AVC capability inventory once on any
+rejection. On Tab A7 (SM-T505, Android 14) `OMX.qcom.video.decoder.avc`
+advertises 1920x1200 yet rejects configure with `CodecException
+code=-1010 diag=…error_neg_1010` in every format variant, while
+`c2.android.avc.decoder` (software) opens and decodes — the current
+source of mirror lag/ghosting. One probe runs per decoder instance to
+narrow the cause: it configures every hardware AVC decoder WITHOUT
+the surface (ByteBuffer output, `COLOR_FormatYUV420Flexible`,
+csd from the keyframe) and releases it. "opens WITHOUT surface"
+pins the rejection on surface input; "fails without surface too"
+points at the format or size. Log lines: `decoder diagnostic: '<name>'
+…`.
+
 ## Results log
 
 (none yet)

@@ -28,6 +28,10 @@ use tokio::sync::mpsc;
 /// and keyframe flags again.
 const POLL: Duration = Duration::from_millis(200);
 
+/// Frame-flow heartbeat cadence (docs/TESTING.md, "Frame-flow
+/// heartbeats").
+const HEARTBEAT: Duration = Duration::from_secs(2);
+
 /// Opens this platform's encoder for a config (Linux and Windows pick
 /// different candidate lists, AGENTS.md rule 2).
 pub type EncoderOpener =
@@ -88,7 +92,28 @@ pub fn pump(
     };
     // pts relative to session start (docs/PROTOCOL.md, "Clocks").
     let base_us = slateway_core::monotonic_us();
+    // Frame-flow heartbeat (docs/TESTING.md, "Frame-flow
+    // heartbeats"): a window with zero encodes while the desktop
+    // visibly changes puts the stall at or after the encoder; the
+    // capture worker's counters disambiguate the stages before it.
+    let mut heartbeat_at = std::time::Instant::now() + HEARTBEAT;
+    let mut hb_encoded = 0u64;
+    let mut hb_skipped = 0u64;
+    let mut hb_errors = 0u64;
     loop {
+        if std::time::Instant::now() >= heartbeat_at {
+            heartbeat_at = std::time::Instant::now() + HEARTBEAT;
+            eprintln!(
+                "video: encode 2s: encoded={} skipped={} errs={} total={}",
+                hb_encoded,
+                hb_skipped,
+                hb_errors,
+                counters.frames_encoded.load(Ordering::Relaxed),
+            );
+            hb_encoded = 0;
+            hb_skipped = 0;
+            hb_errors = 0;
+        }
         if keyframe_req.swap(false, Ordering::Relaxed) {
             // A keyframe request (decoder reset on the tablet) re-opens
             // the encoder: the fresh stream starts with SPS/PPS + IDR.
@@ -113,11 +138,13 @@ pub fn pump(
         // ever dropped (latency rule 1).
         if tx.capacity() == 0 {
             counters.frames_skipped.fetch_add(1, Ordering::Relaxed);
+            hb_skipped += 1;
             continue;
         }
         match encoder.encode(&frame) {
             Ok(packets) => {
                 counters.frames_encoded.fetch_add(1, Ordering::Relaxed);
+                hb_encoded += 1;
                 for packet in packets {
                     if send_packet(&tx, &packet, base_us).is_err() {
                         // Session is gone (all senders dropped).
@@ -129,6 +156,7 @@ pub fn pump(
                 // Geometry or format mismatches repeat every frame:
                 // one error per burst, then the capture keeps running
                 // so a later frame may still fit.
+                hb_errors += 1;
                 if counters.encode_errors.fetch_add(1, Ordering::Relaxed) == 0 {
                     eprintln!("video: encode failed ({err}); dropping frames until it fits");
                 }
