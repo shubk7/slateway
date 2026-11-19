@@ -93,6 +93,9 @@ jobs:
               install -y -q --no-install-recommends \
               protobuf-compiler libpipewire-0.3-dev \
               libavcodec-dev libavformat-dev libavutil-dev
+            # actions/cache runs as the runner user; apt's root-owned
+            # partial/ and lock would fail the post-job save.
+            sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/apt-archives"
           elif command -v choco >/dev/null; then
             choco install protoc -y --no-progress
           else
