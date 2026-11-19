@@ -120,7 +120,9 @@ fallbacks (1920x1080, 1280x720), releasing each candidate. Opens at
 smaller sizes pin the rejection on the streamed size; failures
 everywhere point at a device quirk. 2026-11-17: the probe fails
 without a surface too, so the surface is not the cause. Log lines:
-`decoder diagnostic: '<name>' …`.
+`decoder diagnostic: '<name>' …`. The A7 freeze investigation is
+paused (2026-11-19, results log); the reordered ladder stays because
+it is the safer default for software decoders.
 
 ## Results log
 
@@ -143,3 +145,10 @@ without a surface too, so the surface is not the cause. Log lines:
   stutters, no lag, no ghosting, touch input works well. Pending: device
   model, the session's decoder-open logcat (hardware decode
   confirmation), and whether the click freeze reproduced at all.
+- 2026-11-19 · A7 investigation paused: the Tab A7 (SM-T505) freezes
+  and ghosts while the Tab S6 runs the same build clean, so the
+  maintainer reads it as device/ROM-specific (the A7 runs a custom ROM)
+  rather than a pipeline defect. The A7 stays the low-end baseline for
+  decode load, but no further freeze work until it matters for the
+  milestone. S6 is the primary day-to-day test device by maintainer
+  preference, not a project-wide priority choice.
