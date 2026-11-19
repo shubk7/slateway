@@ -78,6 +78,26 @@ libx264 fallback). The tablet must be running the app build with the
 video decoder; capture setup on Linux may show a screen-share consent
 dialog once per session.
 
+## Frame pacing
+
+`--fps N` (default 60) makes the daemon send a constant frame rate
+instead of only on compositor damage; `--fps 0` restores the
+damage-driven stream for comparison. Capture stays damage-driven — the
+compositor decides when a buffer exists — so the pump holds the newest
+frame and re-sends it when the pacing deadline passes. `--pacing`
+picks the policy (spike branch `spike/frame-pacing`; the choice is
+pending a hardware A/B):
+
+- `fill` (default) — fresh frames go out immediately; repeats hold
+  the floor at `fps`. No added latency; the rate can exceed `fps` when
+  the compositor bursts (~83 frames/s for a 60 Hz monitor was seen on
+  Linux).
+- `tick` — exactly one frame per period, the newest at the tick.
+  Even cadence and a hard cap, at up to one period of frame age.
+
+Watch `video: encode 2s: encoded=… repeated=… skipped=… errs=…` to see
+how much of the stream is repeats.
+
 ## Touch as pointer
 
 `--allow-input` (with `--mirror`) lets tablet touches drive the host

@@ -80,9 +80,10 @@ only, never frame or input content (docs/SECURITY.md):
   worker skipped frames. (2026-11-17 run: the freeze showed
   `callbacks=0` for ~40 s with the loop provably alive — the
   compositor stopped delivering buffers.)
-- Host, every 2 s — `video: encode 2s: encoded=… skipped=… errs=…
-  total=…` (pump): capture publishing while `encoded` stays 0 puts
-  the stall at or after the encoder.
+- Host, every 2 s — `video: encode 2s: encoded=… repeated=… skipped=…
+  errs=… total=…` (pump): capture publishing while `encoded` stays 0
+  puts the stall at or after the encoder; `repeated` counts the AUs
+  that re-sent an unchanged frame to hold the pacing floor.
 - Host, per injection — `input: Down motion=… press=… us`,
   `input: Up release=… us`, and a 1 s `input: moves=… max=… us`
   heartbeat: a notify round trip that hangs shows up as a missing or
@@ -91,6 +92,39 @@ only, never frame or input content (docs/SECURITY.md):
   (watchdog thread): runs even while the reader thread is blocked in
   readFrame, so it distinguishes "host stopped sending" from
   "tablet stopped decoding".
+
+## Frame pacing
+
+Capture is damage-driven (the compositor delivers a buffer only when
+the screen changes), so the pump owns the delivery rate: it holds the
+newest frame and re-sends it when the pacing deadline passes
+(`--fps N`, default 60; `--fps 0` = damage-driven). Two policies ship
+behind `--pacing` on branch `spike/frame-pacing`; the winner is
+chosen from a hardware A/B and then logged as an ADR:
+
+- `fill` — fresh frames never wait; repeats hold the floor at `fps`.
+  Zero added latency, but the rate exceeds `fps` when the compositor
+  bursts (~83 frames/s for a 60 Hz monitor in the 2026-11-17 run).
+- `tick` — exactly one frame per period, the newest at the tick. Even
+  cadence and a hard cap, at up to one period of frame age (16.7 ms
+  at 60).
+
+A/B protocol on the S6 (one variable at a time; the APK never
+changes, only the daemon):
+
+1. `--fps 0` (baseline, damage-driven), `--fps 60 --pacing fill`,
+   `--fps 60 --pacing tick`, each for the same ~2 minute routine
+   (scroll, drag a window, play video, type in an editor).
+2. Record per run: the `video: encode 2s:` lines (encoded/repeated/
+   skipped/errs), the tablet's 1 s watchdog (must stay near the pacing
+   rate), felt smoothness and latency, and glass-to-glass p95 if
+   measured (M1 exit criterion ≤ 80 ms).
+3. Repeat `fill` vs `tick` at 30 fps if the tablet struggles at 60.
+
+Repeats are re-encoded, not resent, so a static screen costs almost
+nothing in bitrate but keeps the encoder and decoder ticking; each
+repeat carries a fresh pts so the tablet's stats see send time, not
+content age.
 
 ## Hardware decode
 
