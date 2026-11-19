@@ -20,7 +20,7 @@ use slateway_platform::encoder::EncoderConfig;
 use slateway_platform::input::{InputError, PointerInjector};
 use slateway_proto::input::{EventKind, InputEvent, Tool};
 use slatewayd::session::{SessionConfig, SharedTablets, serve_once};
-use slatewayd::video::{EncoderOpener, Pacing, PacingMode, StartedVideo, VideoSource};
+use slatewayd::video::{EncoderOpener, StartedVideo, VideoSource};
 use tempfile::TempDir;
 use tokio::sync::Mutex;
 
@@ -123,7 +123,7 @@ impl VideoSource for TestVideoSource {
             },
             open_encoder: open,
             injector: Some(Box::new(self.recorder.clone())),
-            pacing: Pacing::default(),
+            pacing_fps: 0,
         })
     }
 }
@@ -364,7 +364,7 @@ impl VideoSource for PortalLikeSource {
             },
             open_encoder: open,
             injector: None,
-            pacing: Pacing::default(),
+            pacing_fps: 0,
         })
     }
 }
@@ -513,7 +513,7 @@ impl CaptureSource for StaticCapture {
     fn stop(&mut self) {}
 }
 
-/// Paces a static screen at 120 fps in tick mode.
+/// Paces a static screen at 120 fps.
 struct PacedSource;
 
 impl VideoSource for PacedSource {
@@ -534,10 +534,7 @@ impl VideoSource for PacedSource {
             },
             open_encoder: open,
             injector: None,
-            pacing: Pacing {
-                fps: 120,
-                mode: PacingMode::Tick,
-            },
+            pacing_fps: 120,
         })
     }
 }

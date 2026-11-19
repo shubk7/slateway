@@ -37,65 +37,25 @@ const HEARTBEAT: Duration = Duration::from_secs(2);
 pub type EncoderOpener =
     dyn Fn(&EncoderConfig) -> Result<(Box<dyn Encoder>, EncoderInfo), EncoderError> + Send;
 
-/// How the pump paces a constant-rate stream (docs/TESTING.md, "Frame
-/// pacing"; the choice between the two modes is pending a hardware
-/// A/B, so both ship behind `--pacing` on the spike branch).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PacingMode {
-    /// Fresh frames never wait — they go out the moment the capture
-    /// delivers them — and a repeat of the last frame keeps the floor
-    /// at `fps` when the screen is static. Zero added latency; the
-    /// rate may exceed `fps` when the compositor bursts (mutter
-    /// delivered ~83 frames/s for a 60 Hz monitor in the 2026-11-17
-    /// run).
-    Fill,
-    /// Exactly one frame per period: at each tick the newest captured
-    /// frame is encoded, or a repeat of the last one when nothing new
-    /// arrived. Perfectly even cadence and a hard `fps` cap, at the
-    /// cost of up to one period of frame age (16.7 ms at 60).
-    Tick,
+/// The send period for `--fps`; `None` for the damage-driven stream
+/// (`--fps 0`).
+fn pacing_period(fps: u32) -> Option<Duration> {
+    (fps > 0).then(|| Duration::from_secs_f64(1.0 / f64::from(fps)))
 }
 
-/// Constant-rate pacing for the pump. `fps == 0` keeps the
-/// damage-driven stream (encode only when the compositor delivers a
-/// new frame), which is the pre-pacing behaviour and the A/B baseline.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Pacing {
-    pub fps: u32,
-    pub mode: PacingMode,
-}
-
-impl Default for Pacing {
-    fn default() -> Self {
-        // Damage-driven unless the daemon asks otherwise; tests and
-        // embedders keep the old semantics by default.
-        Pacing {
-            fps: 0,
-            mode: PacingMode::Fill,
-        }
-    }
-}
-
-impl Pacing {
-    /// The send period; `None` for damage-driven.
-    fn period(self) -> Option<Duration> {
-        (self.fps > 0).then(|| Duration::from_secs_f64(1.0 / f64::from(self.fps)))
-    }
-}
-
-/// The send decisions of one pacing policy, kept pure so the timing
-/// rules are unit-testable without a capture or an encoder.
+/// The pump's pacing state for a constant-rate stream: one send per
+/// period, the newest captured frame at each tick (docs/TESTING.md,
+/// "Frame pacing"; ADR-015). Kept pure so the timing rules are
+/// unit-testable without a capture or an encoder.
 struct Pacer {
-    mode: PacingMode,
     period: Duration,
     /// The instant the next send is due.
     deadline: Instant,
 }
 
 impl Pacer {
-    fn new(mode: PacingMode, period: Duration, now: Instant) -> Self {
+    fn new(period: Duration, now: Instant) -> Self {
         Pacer {
-            mode,
             period,
             deadline: now,
         }
@@ -107,16 +67,9 @@ impl Pacer {
         self.deadline.saturating_duration_since(now)
     }
 
-    /// Whether this wake-up sends a frame: `had_fresh` is true when a
-    /// new capture frame arrived during the wait.
-    fn should_send(&self, now: Instant, had_fresh: bool) -> bool {
-        match self.mode {
-            // A fresh frame is never delayed; the deadline only
-            // matters for repeats on a static screen.
-            PacingMode::Fill => had_fresh || now >= self.deadline,
-            // One frame per period, no matter when the capture fired.
-            PacingMode::Tick => now >= self.deadline,
-        }
+    /// Whether this wake-up sends a frame.
+    fn due(&self, now: Instant) -> bool {
+        now >= self.deadline
     }
 
     /// Advances the deadline after a send (or a skipped one).
@@ -142,9 +95,9 @@ pub struct StartedVideo {
     pub config: EncoderConfig,
     pub open_encoder: Box<EncoderOpener>,
     pub injector: Option<Box<dyn PointerInjector>>,
-    /// Constant-rate pacing (`--fps` / `--pacing`); default is the
+    /// Constant-rate pacing (`--fps`, ADR-015); 0 keeps the
     /// damage-driven stream.
-    pub pacing: Pacing,
+    pub pacing_fps: u32,
 }
 
 /// Produces the platform video source for a session. `start` blocks
@@ -201,16 +154,22 @@ pub fn pump(
     let mut hb_repeated = 0u64;
     let mut hb_skipped = 0u64;
     let mut hb_errors = 0u64;
-    // Constant-rate pacing (docs/TESTING.md, "Frame pacing"). The
-    // capture stays damage-driven — the compositor decides when a
-    // buffer exists — so the pump holds the newest frame and re-sends
-    // it on the pacing deadline. `None` keeps the damage-driven
-    // stream (`--fps 0`).
-    let mut pacer = started
-        .pacing
-        .period()
-        .map(|period| Pacer::new(started.pacing.mode, period, std::time::Instant::now()));
+    // Constant-rate pacing (docs/TESTING.md, "Frame pacing";
+    // ADR-015). The capture stays damage-driven — the compositor
+    // decides when a buffer exists — so the pump holds the newest
+    // frame and sends exactly one frame per period, re-sending it when
+    // no new damage arrived. `None` keeps the damage-driven stream
+    // (`--fps 0`).
+    let mut pacer = pacing_period(started.pacing_fps)
+        .map(|period| Pacer::new(period, std::time::Instant::now()));
     let mut last_frame: Option<CaptureFrame> = None;
+    // Which captured frame is held, and which one went out last: a
+    // send is a repeat exactly when no new capture replaced the held
+    // frame since the previous send (the tick may sample a frame that
+    // arrived during an earlier iteration). Identity is the generation
+    // counter, not the pts: a repeat is restamped in place.
+    let mut generation = 0u64;
+    let mut last_sent_generation = 0u64;
     loop {
         if std::time::Instant::now() >= heartbeat_at {
             heartbeat_at = std::time::Instant::now() + HEARTBEAT;
@@ -261,10 +220,11 @@ pub fn pump(
             // Newest-frame-wins: an unclaimed frame is replaced, never
             // queued (latency rule 1).
             last_frame = Some(frame);
+            generation += 1;
         }
         let now = std::time::Instant::now();
         let send = match pacer.as_ref() {
-            Some(pacer) => pacer.should_send(now, had_fresh),
+            Some(pacer) => pacer.due(now),
             // Damage-driven: every captured frame is sent.
             None => had_fresh,
         };
@@ -286,14 +246,16 @@ pub fn pump(
             hb_skipped += 1;
             continue;
         }
-        if !had_fresh {
-            // A repeat re-sends the pixels but carries a fresh
+        if generation == last_sent_generation {
+            // A repeat re-sends the same pixels but carries a fresh
             // timestamp (same clock domain as the capture's pts), so
             // pts stays monotonic and the tablet's stats see when the
             // frame was sent rather than when its content changed.
             frame.pts_us = slateway_platform::capture::monotonic_us();
             counters.frames_repeated.fetch_add(1, Ordering::Relaxed);
             hb_repeated += 1;
+        } else {
+            last_sent_generation = generation;
         }
         match encoder.encode(frame) {
             Ok(packets) => {
@@ -346,9 +308,9 @@ fn send_packet(
 pub struct PlatformVideoSource {
     /// Touch-as-pointer requested (the `--allow-input` flag).
     pub allow_input: bool,
-    /// Constant-rate pacing (`--fps`, `--pacing`); fps 0 keeps the
+    /// Constant-rate pacing (`--fps`, ADR-015); 0 keeps the
     /// damage-driven stream.
-    pub pacing: Pacing,
+    pub fps: u32,
 }
 
 impl VideoSource for PlatformVideoSource {
@@ -358,21 +320,17 @@ impl VideoSource for PlatformVideoSource {
                 // Negotiate the pacing rate so the compositor does not
                 // deliver faster than the pump will send; a static screen
                 // is filled by repeats regardless.
-                max_fps: if self.pacing.fps > 0 {
-                    self.pacing.fps
-                } else {
-                    60
-                },
+                max_fps: if self.fps > 0 { self.fps } else { 60 },
                 restore_token: None,
                 with_input: self.allow_input,
             },
-            self.pacing,
+            self.fps,
         )
     }
 }
 
 #[cfg(target_os = "linux")]
-fn start_platform(config: &CaptureConfig, pacing: Pacing) -> Result<StartedVideo, String> {
+fn start_platform(config: &CaptureConfig, fps: u32) -> Result<StartedVideo, String> {
     use slateway_linux::PortalCapture;
     let mut capture = PortalCapture::default();
     let info = capture.start(config).map_err(|e| e.to_string())?;
@@ -398,28 +356,28 @@ fn start_platform(config: &CaptureConfig, pacing: Pacing) -> Result<StartedVideo
         config: EncoderConfig {
             width: info.width,
             height: info.height,
-            fps: encoder_fps(info.fps, pacing),
+            fps: encoder_fps(info.fps, fps),
             bitrate_kbps: 0,
         },
         open_encoder: Box::new(slateway_linux::encoder::start),
         injector,
-        pacing,
+        pacing_fps: fps,
     })
 }
 
 /// The encoder's nominal rate: the pacing rate when pacing is on, the
 /// negotiated capture rate otherwise. It also rides `Configure.fps` to
 /// the tablet.
-fn encoder_fps(capture_fps: u32, pacing: Pacing) -> u32 {
-    if pacing.fps > 0 {
-        pacing.fps
+fn encoder_fps(capture_fps: u32, pacing_fps: u32) -> u32 {
+    if pacing_fps > 0 {
+        pacing_fps
     } else {
         capture_fps
     }
 }
 
 #[cfg(target_os = "windows")]
-fn start_platform(config: &CaptureConfig, pacing: Pacing) -> Result<StartedVideo, String> {
+fn start_platform(config: &CaptureConfig, fps: u32) -> Result<StartedVideo, String> {
     use slateway_win::WgcCapture;
     let mut source = Box::new(WgcCapture::default()) as Box<dyn CaptureSource>;
     let info = source.start(config).map_err(|e| e.to_string())?;
@@ -441,96 +399,70 @@ fn start_platform(config: &CaptureConfig, pacing: Pacing) -> Result<StartedVideo
         config: EncoderConfig {
             width: info.width,
             height: info.height,
-            fps: encoder_fps(info.fps, pacing),
+            fps: encoder_fps(info.fps, fps),
             bitrate_kbps: 0,
         },
         open_encoder: Box::new(slateway_win::encoder::start),
         injector,
-        pacing,
+        pacing_fps: fps,
     })
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-fn start_platform(_config: &CaptureConfig, _pacing: Pacing) -> Result<StartedVideo, String> {
+fn start_platform(_config: &CaptureConfig, _fps: u32) -> Result<StartedVideo, String> {
     Err("this platform has no video capture backend".into())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Pacer, Pacing, PacingMode};
+    use super::{Pacer, pacing_period};
     use std::time::{Duration, Instant};
 
     const PERIOD: Duration = Duration::from_millis(16);
 
     #[test]
     fn damage_driven_has_no_period() {
-        assert!(Pacing::default().period().is_none());
-        let paced = Pacing {
-            fps: 60,
-            mode: PacingMode::Fill,
-        };
-        assert_eq!(paced.period(), Some(Duration::from_secs_f64(1.0 / 60.0)));
-    }
-
-    #[test]
-    fn fill_sends_a_fresh_frame_without_waiting() {
-        let t0 = Instant::now();
-        let mut pacer = Pacer::new(PacingMode::Fill, PERIOD, t0);
-        assert!(pacer.should_send(t0, true));
-        pacer.advance(t0);
-        // 4 ms into the period a new frame still goes out immediately:
-        // fill mode adds no latency.
-        let early = t0 + Duration::from_millis(4);
-        assert!(pacer.should_send(early, true));
-        // Nothing new mid-period: no repeat yet.
-        assert!(!pacer.should_send(early, false));
-    }
-
-    #[test]
-    fn fill_repeats_when_the_deadline_passes_without_a_frame() {
-        let t0 = Instant::now();
-        let mut pacer = Pacer::new(PacingMode::Fill, PERIOD, t0);
-        pacer.advance(t0);
-        assert_eq!(pacer.wait(t0), PERIOD);
-        assert!(!pacer.should_send(t0 + Duration::from_millis(8), false));
-        assert!(pacer.should_send(t0 + PERIOD, false));
+        assert_eq!(pacing_period(0), None);
+        assert_eq!(pacing_period(60), Some(Duration::from_secs_f64(1.0 / 60.0)));
+        assert_eq!(pacing_period(30), Some(Duration::from_secs_f64(1.0 / 30.0)));
     }
 
     #[test]
     fn tick_holds_a_fresh_frame_to_the_deadline() {
         let t0 = Instant::now();
-        let mut pacer = Pacer::new(PacingMode::Tick, PERIOD, t0);
-        assert!(pacer.should_send(t0, true));
+        let mut pacer = Pacer::new(PERIOD, t0);
+        assert!(pacer.due(t0));
         pacer.advance(t0);
         let early = t0 + Duration::from_millis(4);
-        assert!(!pacer.should_send(early, true), "a fresh frame waits");
-        assert!(!pacer.should_send(t0 + Duration::from_millis(15), false));
-        assert!(pacer.should_send(t0 + PERIOD, true));
+        assert!(!pacer.due(early), "a fresh frame waits for the tick");
         assert_eq!(pacer.wait(early), Duration::from_millis(12));
+        assert!(!pacer.due(t0 + Duration::from_millis(15)));
+        assert!(pacer.due(t0 + PERIOD));
     }
 
     #[test]
-    fn tick_sends_once_after_a_stall_and_rebases() {
+    fn stall_sends_once_and_rebases() {
         let t0 = Instant::now();
-        let mut pacer = Pacer::new(PacingMode::Tick, PERIOD, t0);
+        let mut pacer = Pacer::new(PERIOD, t0);
         pacer.advance(t0);
         // Blocked for five periods: one send, then a full period of
         // quiet — never a catch-up burst.
         let late = t0 + PERIOD * 5;
-        assert!(pacer.should_send(late, true));
+        assert!(pacer.due(late));
         pacer.advance(late);
-        assert!(!pacer.should_send(late, true));
-        assert!(pacer.should_send(late + PERIOD, false));
+        assert!(!pacer.due(late));
+        assert_eq!(pacer.wait(late), PERIOD);
+        assert!(pacer.due(late + PERIOD));
     }
 
     #[test]
     fn keyframe_request_bypasses_the_deadline() {
         let t0 = Instant::now();
-        let mut pacer = Pacer::new(PacingMode::Tick, PERIOD, t0);
+        let mut pacer = Pacer::new(PERIOD, t0);
         pacer.advance(t0);
         let now = t0 + Duration::from_millis(1);
-        assert!(!pacer.should_send(now, true));
+        assert!(!pacer.due(now));
         pacer.send_now(now);
-        assert!(pacer.should_send(now, true));
+        assert!(pacer.due(now));
     }
 }

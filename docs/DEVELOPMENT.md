@@ -84,19 +84,14 @@ dialog once per session.
 instead of only on compositor damage; `--fps 0` restores the
 damage-driven stream for comparison. Capture stays damage-driven — the
 compositor decides when a buffer exists — so the pump holds the newest
-frame and re-sends it when the pacing deadline passes. `--pacing`
-picks the policy (spike branch `spike/frame-pacing`; the choice is
-pending a hardware A/B):
-
-- `fill` (default) — fresh frames go out immediately; repeats hold
-  the floor at `fps`. No added latency; the rate can exceed `fps` when
-  the compositor bursts (~83 frames/s for a 60 Hz monitor was seen on
-  Linux).
-- `tick` — exactly one frame per period, the newest at the tick.
-  Even cadence and a hard cap, at up to one period of frame age.
+frame and sends one frame per period, re-sending it when nothing new
+arrived (the `tick` policy, ADR-015; chosen by the 2026-11-19 A/B in
+TESTING.md). A keyframe request sends at once instead of waiting for the
+next tick.
 
 Watch `video: encode 2s: encoded=… repeated=… skipped=… errs=…` to see
-how much of the stream is repeats.
+how much of the stream is repeats; a mostly static screen is nearly all
+repeats.
 
 ## Touch as pointer
 

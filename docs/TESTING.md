@@ -26,7 +26,7 @@ Record every measured result, with date and git commit, in this file's results l
 |---|---|---|
 | Laptop on Windows | Host | RTX 4050 (NVENC), Intel UHD (QSV), i7-14650HX |
 | Laptop on CachyOS | Host | Same hardware |
-| Galaxy Tab S6 Lite | Pen reference | S Pen, USB 2.0, 2000x1200 at 60 Hz (verify) |
+| Galaxy Tab S6 Lite (SM-P620, 2024) | Pen reference | S Pen, USB 2.0, 1920x1200 at 60 Hz (streamed resolution confirmed 2026-11-19), Exynos hardware AVC decoder |
 | Galaxy Tab A7 | Low-end baseline | No pen, weaker decoder, USB 2.0 |
 
 Android and One UI versions: record here once checked.
@@ -95,36 +95,66 @@ only, never frame or input content (docs/SECURITY.md):
 
 ## Frame pacing
 
-Capture is damage-driven (the compositor delivers a buffer only when
-the screen changes), so the pump owns the delivery rate: it holds the
-newest frame and re-sends it when the pacing deadline passes
-(`--fps N`, default 60; `--fps 0` = damage-driven). Two policies ship
-behind `--pacing` on branch `spike/frame-pacing`; the winner is
-chosen from a hardware A/B and then logged as an ADR:
+Capture is damage-driven (the compositor delivers a buffer only when the
+screen changes), so the pump owns the delivery rate: it holds the newest
+frame and sends exactly one frame per period (`--fps N`, default 60;
+`--fps 0` = damage-driven, the pre-pacing baseline). A period with no
+new damage re-sends the held frame, so a static screen keeps the
+tablet's decoder ticking instead of going silent (ADR-015).
 
-- `fill` — fresh frames never wait; repeats hold the floor at `fps`.
-  Zero added latency, but the rate exceeds `fps` when the compositor
-  bursts (~83 frames/s for a 60 Hz monitor in the 2026-11-17 run).
-- `tick` — exactly one frame per period, the newest at the tick. Even
-  cadence and a hard cap, at up to one period of frame age (16.7 ms
-  at 60).
-
-A/B protocol on the S6 (one variable at a time; the APK never
-changes, only the daemon):
-
-1. `--fps 0` (baseline, damage-driven), `--fps 60 --pacing fill`,
-   `--fps 60 --pacing tick`, each for the same ~2 minute routine
-   (scroll, drag a window, play video, type in an editor).
-2. Record per run: the `video: encode 2s:` lines (encoded/repeated/
-   skipped/errs), the tablet's 1 s watchdog (must stay near the pacing
-   rate), felt smoothness and latency, and glass-to-glass p95 if
-   measured (M1 exit criterion ≤ 80 ms).
-3. Repeat `fill` vs `tick` at 30 fps if the tablet struggles at 60.
+The policy is `tick`: one frame per period, the newest captured frame at
+each tick. That gives an even cadence and a hard cap at `fps`, at up to
+one period of frame age (16.7 ms at 60). It never catches up after a
+stall — one send, then a full period of quiet — and a keyframe request
+sends immediately instead of waiting for the next tick.
 
 Repeats are re-encoded, not resent, so a static screen costs almost
 nothing in bitrate but keeps the encoder and decoder ticking; each
 repeat carries a fresh pts so the tablet's stats see send time, not
-content age.
+content age. The `video: encode 2s:` heartbeat shows
+`encoded=… repeated=… skipped=… errs=…`.
+
+### Why tick, not fill (A/B on 2026-11-19)
+
+The spike also implemented `fill` (fresh frames never wait; repeats hold
+the floor) and both shipped behind `--pacing` so one APK covered the
+whole A/B. Three runs on the S6 Lite (SM-P620, Linux host, NVENC,
+1920x1200, hardware `csd+low-latency` decoder), same ~2 minute routine
+(scroll, drag, video, typing), host counters plus the tablet's 1 s
+watchdog. The host panel is 1920x1200 at 165 Hz and the tablet is
+60 Hz, so 60 is the ceiling the stream is paced to; `fill` can only
+overshoot as far as the compositor's damage rate allows (165 Hz here):
+
+| run | tablet fps (avg / median / min–max / stdev) | windows < 30 fps | bitrate | repeats |
+|---|---|---|---|---|
+| `--fps 0` | 24.5 / 17.5 / 0–117 / 26.5 | 93 of 132 | not measured (stopped by hand) | 0% |
+| `--fps 60 --pacing fill` | 72.4 / 72.0 / 58–107 / 9.0 | 0 of 81 | 7.10 Mbit/s | 50% |
+| `--fps 60 --pacing tick` | 59.9 / 60.0 / 58–62 / 0.75 | 0 of 98 | 5.28 Mbit/s | 99% |
+
+The maintainer felt `fill` and `tick` almost the same, and both much
+better than the damage-driven baseline, whose idle gaps (the watchdog
+saw under 30 frames in 93 of 132 one-second windows, many of them 0)
+are the stutter. `fill` did exactly
+what was predicted: the compositor bursts pushed the stream to 72 fps
+against a 60 fps request. `tick` won on the invariants — hard cap, even
+cadence (stdev 0.75 fps), no catch-up burst, 26% less bitrate — so the
+`fill` path and the `--pacing` flag were removed (ADR-015).
+
+Note for the next run: the damage-driven baseline ended with the portal
+delivering 1920x1160 buffers while the encoder was opened for 1920x1200,
+which the encoder rejects ("re-open on resolution change"); the stream
+stayed at zero encodes until the daemon was stopped. Geometry changes
+need the planned encoder re-open; this is not a pacing regression.
+
+### Pacing checks (other devices and rates)
+
+1. Run `--fps 0`, `--fps 30` and `--fps 60` through the same routine
+   (one variable at a time; the APK never changes, only the daemon).
+2. Record per run: the `video: encode 2s:` lines (encoded/repeated/
+   skipped/errs), the tablet's 1 s watchdog (must stay near the pacing
+   rate, not oscillate), felt smoothness and latency, and glass-to-glass
+   p95 if measured (M1 exit criterion <= 80 ms).
+3. `--fps 30` is the fallback for devices that struggle to decode 60.
 
 ## Hardware decode
 
@@ -175,10 +205,8 @@ it is the safer default for software decoders.
   produced only ~2–3 frames (the cursor-jump repaint). Injection healthy
   (0.7–1.5 ms per notify; no hung portal calls). Decoder diagnostic: qcom
   -1010 fails WITHOUT the surface too — the surface is not the cause.
-- 2026-11-17 · Tab S6 (model TBC) · Linux host: maintainer report — no
-  stutters, no lag, no ghosting, touch input works well. Pending: device
-  model, the session's decoder-open logcat (hardware decode
-  confirmation), and whether the click freeze reproduced at all.
+- 2026-11-17 · Tab S6 Lite (SM-P620) · Linux host: maintainer report —
+  no stutters, no lag, no ghosting, touch input works well.
 - 2026-11-19 · A7 investigation paused: the Tab A7 (SM-T505) freezes
   and ghosts while the Tab S6 runs the same build clean, so the
   maintainer reads it as device/ROM-specific (the A7 runs a custom ROM)
@@ -186,3 +214,15 @@ it is the safer default for software decoders.
   decode load, but no further freeze work until it matters for the
   milestone. S6 is the primary day-to-day test device by maintainer
   preference, not a project-wide priority choice.
+- 2026-11-19 · Tab S6 Lite (SM-P620) · Linux host: frame-pacing A/B
+  (`--fps 0`, `--fps 60 --pacing fill`, `--fps 60 --pacing tick`), same
+  routine each run. Damage-driven: 24.5 fps average, 0 frames in most
+  idle seconds, 3 encode errors when the portal switched to 1920x1160
+  buffers at the end. `fill`: 72.4 fps (compositor bursts over the
+  60 fps request), 7.10 Mbit/s, 50% repeats, no skips or errors.
+  `tick`: 59.9 fps (median 60, stdev 0.75, 58–62), 5.28 Mbit/s, 99%
+  repeats, no skips or errors. Hardware `csd+low-latency` decoder on
+  every run; the tablet's watchdog tracked the host's encodes with no
+  stall windows. Maintainer felt `fill` and `tick` almost identical,
+  both clearly better than `--fps 0`. Chose `tick`; `fill` and
+  `--pacing` removed, ADR-015.
