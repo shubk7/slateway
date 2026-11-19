@@ -46,6 +46,10 @@ struct Args {
     echo: bool,
     mirror: bool,
     allow_input: bool,
+    /// Constant-rate pacing (docs/TESTING.md, "Frame pacing"); 0
+    /// keeps the damage-driven stream.
+    fps: u32,
+    pacing: crate::video::PacingMode,
     config_dir: Option<std::path::PathBuf>,
 }
 
@@ -56,6 +60,9 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut echo = false;
     let mut mirror = false;
     let mut allow_input = false;
+    let mut fps = 60u32;
+    let mut pacing = crate::video::PacingMode::Fill;
+    let mut pacing_set = false;
     let mut config_dir = None;
     let mut iter = args;
     while let Some(arg) = iter.next() {
@@ -71,9 +78,29 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Args, String> {
             "--echo" => echo = true,
             "--mirror" => mirror = true,
             "--allow-input" => allow_input = true,
+            "--fps" => {
+                let parsed: u32 = value()?.parse().map_err(|err| format!("--fps: {err}"))?;
+                if parsed > 240 {
+                    return Err(format!(
+                        "--fps {parsed} is out of range (0 = damage-driven, 1-240 otherwise)"
+                    ));
+                }
+                fps = parsed;
+            }
+            "--pacing" => {
+                pacing_set = true;
+                pacing = match value()?.as_str() {
+                    "fill" => crate::video::PacingMode::Fill,
+                    "tick" => crate::video::PacingMode::Tick,
+                    other => return Err(format!("unknown pacing {other} (fill|tick)")),
+                };
+            }
             "--config-dir" => config_dir = Some(std::path::PathBuf::from(value()?)),
             other => return Err(format!("unknown argument {other}")),
         }
+    }
+    if pacing_set && fps == 0 {
+        eprintln!("slatewayd: --pacing has no effect with --fps 0 (damage-driven)");
     }
     Ok(Args {
         transport,
@@ -82,6 +109,8 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Args, String> {
         echo,
         mirror,
         allow_input,
+        fps,
+        pacing,
         config_dir,
     })
 }
@@ -120,7 +149,7 @@ async fn run() -> Result<(), String> {
         eprintln!("slatewayd: known-tablets line {line} skipped: {problem}");
     }
     println!(
-        "slatewayd: host key loaded from {}; transport {:?} on port {}, echo {}, mirror {}, input {}, pairing {}",
+        "slatewayd: host key loaded from {}; transport {:?} on port {}, echo {}, mirror {}, input {}, pairing {}, video {}",
         dir.display(),
         args.transport,
         args.port,
@@ -128,6 +157,11 @@ async fn run() -> Result<(), String> {
         if args.mirror { "on" } else { "off" },
         if args.allow_input { "allowed" } else { "off" },
         if args.auto_pair { "auto" } else { "prompted" },
+        if args.fps > 0 {
+            format!("{} fps ({:?} pacing)", args.fps, args.pacing)
+        } else {
+            "damage-driven".to_string()
+        },
     );
     if args.allow_input && !args.mirror {
         eprintln!(
@@ -196,6 +230,10 @@ async fn run() -> Result<(), String> {
         let auto_pair = args.auto_pair;
         let mirror = args.mirror;
         let allow_input = args.allow_input;
+        let pacing = crate::video::Pacing {
+            fps: args.fps,
+            mode: args.pacing,
+        };
         let sessions = Arc::clone(&sessions);
         tokio::spawn(async move {
             // Counts this session for the tunnel-refresh gate; the
@@ -234,7 +272,10 @@ async fn run() -> Result<(), String> {
             // rides the mirror session (its portal session or capture
             // target); --allow-input without --mirror is a no-op.
             let video: Option<Box<dyn crate::video::VideoSource>> = if mirror {
-                Some(Box::new(crate::video::PlatformVideoSource { allow_input }))
+                Some(Box::new(crate::video::PlatformVideoSource {
+                    allow_input,
+                    pacing,
+                }))
             } else {
                 None
             };

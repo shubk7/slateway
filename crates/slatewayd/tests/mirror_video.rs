@@ -20,7 +20,7 @@ use slateway_platform::encoder::EncoderConfig;
 use slateway_platform::input::{InputError, PointerInjector};
 use slateway_proto::input::{EventKind, InputEvent, Tool};
 use slatewayd::session::{SessionConfig, SharedTablets, serve_once};
-use slatewayd::video::{EncoderOpener, StartedVideo, VideoSource};
+use slatewayd::video::{EncoderOpener, Pacing, PacingMode, StartedVideo, VideoSource};
 use tempfile::TempDir;
 use tokio::sync::Mutex;
 
@@ -123,6 +123,7 @@ impl VideoSource for TestVideoSource {
             },
             open_encoder: open,
             injector: Some(Box::new(self.recorder.clone())),
+            pacing: Pacing::default(),
         })
     }
 }
@@ -363,6 +364,7 @@ impl VideoSource for PortalLikeSource {
             },
             open_encoder: open,
             injector: None,
+            pacing: Pacing::default(),
         })
     }
 }
@@ -461,4 +463,142 @@ async fn reconnect_resumes_the_mirror_stream() {
         );
         assert_eq!(report.device_name, "replug-tablet");
     }
+}
+
+/// A monitor that goes static after its first frame: no compositor
+/// damage ever follows, which is exactly the case the pacing floor
+/// exists for (docs/TESTING.md, "Frame pacing").
+struct StaticCapture {
+    sent: bool,
+}
+
+impl CaptureSource for StaticCapture {
+    fn start(&mut self, _config: &CaptureConfig) -> Result<CaptureInfo, CaptureError> {
+        Ok(CaptureInfo {
+            width: 64,
+            height: 48,
+            fps: 120,
+            format: FrameFormat::Bgrx,
+        })
+    }
+
+    fn next_frame(&mut self, timeout: Duration) -> Result<Option<CaptureFrame>, CaptureError> {
+        if self.sent {
+            // A static screen: the compositor delivers nothing.
+            std::thread::sleep(timeout.min(Duration::from_millis(4)));
+            return Ok(None);
+        }
+        self.sent = true;
+        let (width, height) = (64usize, 48usize);
+        let stride = width * 4;
+        let mut data = vec![0u8; height * stride];
+        for y in 0..height {
+            for x in 0..width {
+                let off = y * stride + x * 4;
+                data[off] = (x * 4) as u8;
+                data[off + 1] = (y * 5) as u8;
+                data[off + 2] = 128;
+            }
+        }
+        Ok(Some(CaptureFrame {
+            width: width as u32,
+            height: height as u32,
+            stride,
+            format: FrameFormat::Bgrx,
+            data,
+            pts_us: monotonic_us(),
+        }))
+    }
+
+    fn stop(&mut self) {}
+}
+
+/// Paces a static screen at 120 fps in tick mode.
+struct PacedSource;
+
+impl VideoSource for PacedSource {
+    fn start(&mut self) -> Result<StartedVideo, String> {
+        let mut source = Box::new(StaticCapture { sent: false }) as Box<dyn CaptureSource>;
+        let info = source
+            .start(&CaptureConfig::default())
+            .map_err(|e| e.to_string())?;
+        let open: Box<EncoderOpener> =
+            Box::new(|config: &EncoderConfig| slateway_ffmpeg::start(config, &["libx264"]));
+        Ok(StartedVideo {
+            source,
+            config: EncoderConfig {
+                width: info.width,
+                height: info.height,
+                fps: 120,
+                bitrate_kbps: 0,
+            },
+            open_encoder: open,
+            injector: None,
+            pacing: Pacing {
+                fps: 120,
+                mode: PacingMode::Tick,
+            },
+        })
+    }
+}
+
+/// Regression: with constant-rate pacing a static screen still yields
+/// one AU per period — the tablet never waits for compositor damage —
+/// and the repeats carry monotonic timestamps.
+#[tokio::test(flavor = "multi_thread")]
+async fn paced_stream_repeats_on_a_static_screen() {
+    let (_dir, known) = known_registry();
+    let host_priv = host_key();
+
+    let (a, b) = tokio::io::duplex(64 * 1024);
+    let server = tokio::spawn(async move {
+        let cfg = SessionConfig {
+            echo: false,
+            tick: Duration::from_millis(20),
+            input: false,
+        };
+        let confirm = |_code: &str, _device: &str| true;
+        serve_once(
+            a,
+            &host_priv,
+            &known,
+            &cfg,
+            &confirm,
+            Some(Box::new(PacedSource)),
+        )
+        .await
+    });
+    let client_cfg = mock_tablet::VideoClientConfig {
+        frames: 12,
+        ..Default::default()
+    };
+    let client = mock_tablet::run_video_client(&client_cfg, b);
+    let (client_res, server_res) = tokio::join!(client, server);
+    let summary = client_res.unwrap_or_else(|err| panic!("client failed: {err}"));
+    let report = server_res
+        .unwrap_or_else(|err| panic!("server task failed: {err:?}"))
+        .unwrap_or_else(|err| panic!("server failed: {err}"));
+
+    assert_eq!(summary.fps, 120, "Configure carries the pacing rate");
+    assert_eq!(
+        summary.frames, 12,
+        "the pacing floor kept a static screen streaming"
+    );
+    assert!(summary.first_frame_was_keyframe);
+    assert!(summary.pts_monotonic, "repeats are restamped");
+    let repeated = report
+        .video
+        .frames_repeated
+        .load(std::sync::atomic::Ordering::Relaxed);
+    assert!(
+        repeated >= 10,
+        "a static screen is mostly repeats (got {repeated} of 12)"
+    );
+    assert_eq!(
+        report
+            .video
+            .encode_errors
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
 }
