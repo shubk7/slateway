@@ -64,7 +64,7 @@ jobs:
       # slow mirror only costs the first run after a package change.
       - name: Cache apt archives
         if: runner.os == 'Linux'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ runner.temp }}/apt-archives
           key: apt-${{ runner.os }}-v1-${{ hashFiles('.github/workflows/ci.yml') }}
