@@ -15,12 +15,13 @@ Build, test and lint commands live in `AGENTS.md`. This file covers the environm
 
 FFmpeg must be installed with its development headers (`ffmpeg` on Arch
 pulls in `ffmpeg-dev` equivalents through the package); the encoder
-build links the system `libavcodec`, `libavutil` and friends via
-pkg-config (ADR-014). On Debian/Ubuntu that is `libavcodec-dev
-libavformat-dev libavfilter-dev libavdevice-dev libswscale-dev
-libswresample-dev` — the same set the CI ubuntu job installs. Any
-FFmpeg major from 3.0 through 9.x builds, but a recent one is required
-to run the NVENC hardware path.
+build links the system `libavcodec`, `libavformat` and `libavutil` via
+pkg-config (ADR-014; `slateway-ffmpeg` enables only `ffmpeg-next`'s
+`codec` and `format` features, so the filter, device, swscale and
+swresample headers are not needed). On Debian/Ubuntu that is
+`libavcodec-dev libavformat-dev libavutil-dev` — the same set the CI
+ubuntu job installs. Any FFmpeg major from 3.0 through 9.x builds, but
+a recent one is required to run the NVENC hardware path.
 
 Known runtime limit: FFmpeg 9.0.2 (Arch, Windows CI's gyan build)
 opens `libx264` fine; the Ubuntu 26.04 archive's libavcodec rejects
