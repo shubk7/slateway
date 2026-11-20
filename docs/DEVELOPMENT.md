@@ -9,9 +9,46 @@ Build, test and lint commands live in `AGENTS.md`. This file covers the environm
 - Repo has `.gitattributes` with `* text=auto eol=lf`.
 - CI builds and tests both OSes plus Android on every push, so compile errors surface without rebooting.
 
+## Scripts
+
+`scripts/` holds the same three entry points for both OSes: one-time
+setup, the CI check chain, and a clean rebuild. The shell versions
+detect the package manager (apt, dnf, pacman, zypper); the PowerShell
+versions assume winget (or choco) for the pieces they can install.
+
+```
+scripts/setup.sh [--yes] [--host-only] [--android-sdk DIR]
+scripts/test.sh
+scripts/rebuild.sh [--release] [--no-clean]
+```
+
+```
+powershell -ExecutionPolicy Bypass -File scripts\setup.ps1 [-Yes] [-HostOnly] [-Persist] [-AndroidSdk DIR]
+powershell -ExecutionPolicy Bypass -File scripts\test.ps1
+powershell -ExecutionPolicy Bypass -File scripts\rebuild.ps1 [-Release] [-NoClean]
+```
+
+- `setup` installs the system packages, Rust components, `cargo-deny`,
+  `cargo-fuzz`, `cargo-ndk`, the Android Rust target and the NDK /
+  platform / build-tools. It asks before every change (`--yes`/`-Yes`
+  skips the prompts) and is safe to re-run. Windows setup also
+  downloads the pinned FFmpeg shared build into `tools/ffmpeg` and gets
+  `protoc` from winget, choco or the release zip; `-Persist` writes
+  `FFMPEG_DIR`, `PATH` and `ANDROID_HOME` to the user environment.
+- `test` runs fmt, tests, clippy and `cargo deny` for the
+  workspace, then `assembleDebug testDebugUnitTest lintDebug` for the
+  Android app. The Android half is required, as in CI.
+- `rebuild` cleans `target/`, `fuzz/target/`, `android/native/target/` and
+  the Gradle outputs, then builds the host workspace (debug or
+  `--release`) and the debug APK.
+
+The Android SDK must already be installed (Android Studio or the
+command-line tools); setup installs the SDK packages but not the SDK
+itself. Set `ANDROID_HOME` or pass `--android-sdk`/`-AndroidSdk`.
+
 ## CachyOS (starting package list, verify names)
 
-`rustup`, `clang`, `pkgconf`, `ffmpeg`, `pipewire`, `protobuf`, `android-tools`, a JDK, Android Studio (AUR), `v4l2loopback-dkms` and matching kernel headers. Then `rustup default stable` and `cargo install cargo-deny cargo-fuzz`.
+`rustup`, `clang`, `pkgconf`, `ffmpeg`, `pipewire`, `protobuf`, `android-tools`, a JDK, Android Studio (AUR), `v4l2loopback-dkms` and matching kernel headers. Then `rustup default stable` and `cargo install cargo-deny cargo-fuzz`. `scripts/setup.sh` installs the non-AUR pieces on apt, dnf, pacman and zypper systems; Android Studio and `v4l2loopback` stay manual.
 
 FFmpeg must be installed with its development headers (`ffmpeg` on Arch
 pulls in `ffmpeg-dev` equivalents through the package); the encoder
@@ -47,10 +84,10 @@ Rust with the MSVC toolchain, Visual Studio Build Tools (C++ workload), Windows 
 
 FFmpeg for the encoder (ADR-014): the CI Windows job downloads the
 pinned gyan.dev shared build (`ffmpeg-9.0.2-full_build-shared.zip`)
-and sets `FFMPEG_DIR` plus the `bin` path. Do the same locally:
-download that zip, extract it anywhere, then in PowerShell set
-`FFMPEG_DIR` to the extracted folder and prepend its `bin` directory
-to `PATH` so the test binaries find `avcodec-63.dll` and friends.
+and sets `FFMPEG_DIR` plus the `bin` path. `scripts\setup.ps1` does
+the same locally, extracting to `tools\ffmpeg` (gitignored) and
+pointing `FFMPEG_DIR`/`PATH` at it for the session (`-Persist` writes
+them to the user environment).
 
 Windows-specific notes from the M0 bring-up:
 

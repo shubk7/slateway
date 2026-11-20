@@ -28,6 +28,8 @@ cd fuzz && cargo fuzz run <target>        # when parser code changes
 cd android && ./gradlew assembleDebug testDebugUnitTest lintDebug
 ```
 
+`scripts/setup.*`, `scripts/test.*` and `scripts/rebuild.*` wrap the setup and the whole chain per OS; see `docs/DEVELOPMENT.md`, "Scripts".
+
 ## Rules
 
 1. Work on one `ROADMAP.md` task at a time. Do not add scope; propose it instead.

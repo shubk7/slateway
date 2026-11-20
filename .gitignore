@@ -3,3 +3,7 @@
 # Rust build artifacts (never shared across OSes, see docs/DEVELOPMENT.md)
 /target/
 .logs/
+
+# Windows toolchain downloaded by scripts/setup.ps1 (FFmpeg shared build, protoc)
+/tools/ffmpeg/
+/tools/protoc/
