@@ -2,16 +2,17 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
 # One-time development setup for Windows. Installs the Rust toolchain
-# pieces, the pinned FFmpeg shared build, protoc and the Android SDK
-# components, then checks that everything is visible. Safe to re-run:
-# it only installs what is missing.
+# pieces, LLVM for bindgen, the pinned FFmpeg shared build, protoc and
+# the Android SDK components, then checks that everything is visible.
+# Safe to re-run: it only installs what is missing.
 #
 #   powershell -ExecutionPolicy Bypass -File scripts\setup.ps1 `
 #       [-Yes] [-HostOnly] [-Persist] [-AndroidSdk DIR]
 #
 #   -Yes         do not ask before installing anything
 #   -HostOnly    skip the Android SDK, NDK and Rust target (host work)
-#   -Persist     write FFMPEG_DIR/PATH/ANDROID_HOME to the user environment
+#   -Persist     write FFMPEG_DIR/LIBCLANG_PATH/PATH/ANDROID_HOME to the
+#                user environment
 #   -AndroidSdk  use this SDK instead of ANDROID_HOME / %LOCALAPPDATA%
 
 param(
@@ -74,8 +75,28 @@ else {
     Warn 'Visual Studio Build Tools with the C++ workload not found; rustc needs the MSVC linker (https://visualstudio.microsoft.com/visual-cpp-build-tools/)'
 }
 
+Step 'Checking LLVM (libclang for bindgen)'
+if (-not (Find-LibclangDir)) {
+    if (Have 'winget') {
+        if (-not (Confirm 'Install LLVM with winget (LLVM.LLVM)? bindgen needs libclang.dll')) { Fail 'aborted' }
+        winget install --id LLVM.LLVM -e --silent --accept-package-agreements --accept-source-agreements
+        if ($LASTEXITCODE -ne 0) {
+            Fail "winget install LLVM.LLVM failed (exit $LASTEXITCODE)"
+        }
+        Refresh-Path
+    }
+    else {
+        Warn 'LLVM not found and winget unavailable; install LLVM by hand (https://releases.llvm.org/)'
+    }
+}
+Resolve-Libclang
+if ($Persist) {
+    [Environment]::SetEnvironmentVariable('LIBCLANG_PATH', $env:LIBCLANG_PATH, 'User')
+    Add-UserPath $env:LIBCLANG_PATH
+}
+
 Step 'Checking FFmpeg'
-$localFfmpeg = Join-Path $Root "tools\ffmpeg\$FfmpegFolder"
+$localFfmpeg = Join-Path (Join-Path (Join-Path $Root 'tools') 'ffmpeg') $FfmpegFolder
 if (Test-FfmpegDir $env:FFMPEG_DIR) {
     Ok "FFMPEG_DIR=$env:FFMPEG_DIR"
     Add-SessionPath (Join-Path $env:FFMPEG_DIR 'bin')
@@ -87,7 +108,7 @@ elseif (Test-FfmpegDir $localFfmpeg) {
 }
 else {
     if (-not (Confirm "Download the pinned FFmpeg $FfmpegVersion shared build into tools\ffmpeg?")) { Fail 'aborted' }
-    $tools = Join-Path $Root 'tools\ffmpeg'
+    $tools = Join-Path (Join-Path $Root 'tools') 'ffmpeg'
     New-Item -ItemType Directory -Force -Path $tools | Out-Null
     $zip = Join-Path $env:TEMP 'ffmpeg-shared.zip'
     Invoke-WebRequest -Uri $FfmpegUrl -OutFile $zip -UseBasicParsing
@@ -117,7 +138,7 @@ if (-not (Have 'protoc')) {
     }
     if (-not (Have 'protoc')) {
         Ok 'falling back to the protoc release zip'
-        $dest = Join-Path $Root 'tools\protoc'
+        $dest = Join-Path (Join-Path $Root 'tools') 'protoc'
         $release = Invoke-RestMethod -Uri $ProtocReleaseApi -Headers @{ 'User-Agent' = 'slateway-setup' }
         $asset = $release.assets |
             Where-Object { $_.name -match '^protoc-.*-win64\.zip$' } |
@@ -161,9 +182,9 @@ else {
 
     $needsPackages = $false
     foreach ($piece in @(
-            "ndk\$NdkVersion",
-            "platforms\android-$CompileSdk",
-            "build-tools\$BuildTools"
+            (Join-Path 'ndk' $NdkVersion),
+            (Join-Path 'platforms' "android-$CompileSdk"),
+            (Join-Path 'build-tools' $BuildTools)
         )) {
         if (-not (Test-Path (Join-Path $sdk $piece))) { $needsPackages = $true }
     }
@@ -186,6 +207,7 @@ else {
 Step 'Verifying'
 Ok (& protoc --version)
 Ok "FFMPEG_DIR=$env:FFMPEG_DIR"
+Ok "LIBCLANG_PATH=$env:LIBCLANG_PATH"
 if (Have 'java') {
     Ok (cmd /c 'java -version 2>&1' | Select-Object -First 1)
 }
@@ -193,7 +215,7 @@ else {
     Warn 'java not found; Gradle needs a JDK 17+ (Android Studio ships one under jbr\)'
 }
 if (-not $HostOnly) {
-    Ok "NDK $(Join-Path $sdk "ndk\$NdkVersion")"
+    Ok "NDK $(Join-Path (Join-Path $sdk 'ndk') $NdkVersion)"
     Ok (& cargo ndk --version)
 }
 if (-not (Have 'adb')) {

@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-# Runs the same checks as CI on Windows: fmt, tests, clippy and
+# Runs the same checks as CI on Windows: fmt, build, tests, clippy and
 # cargo deny for the workspace, then the Android assemble, unit tests
 # and lint. The Android half is required (AGENTS.md "Definition of
 # done"), so a missing SDK/NDK fails the script.
@@ -24,10 +24,15 @@ if (-not (Have 'cargo-deny')) {
 Push-Location $Root
 try {
     Resolve-Ffmpeg
+    Resolve-Libclang
 
     Step 'cargo fmt --all --check'
     cargo fmt --all --check
     Assert-Exit 'cargo fmt'
+
+    Step 'cargo build --workspace'
+    cargo build --workspace
+    Assert-Exit 'cargo build'
 
     Step 'cargo test --workspace'
     cargo test --workspace

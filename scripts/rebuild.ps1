@@ -28,6 +28,7 @@ if (-not (Have 'cargo')) {
 Push-Location $Root
 try {
     Resolve-Ffmpeg
+    Resolve-Libclang
     Require-Android
 
     $profile = 'debug'
@@ -43,8 +44,8 @@ try {
         Assert-Exit 'cargo clean'
         # fuzz/ and android/native/ are outside the workspace, so cargo
         # clean does not reach them; Gradle's clean leaves the facade too.
-        Remove-Item -Recurse -Force (Join-Path $Root 'fuzz\target') -ErrorAction SilentlyContinue
-        Push-Location (Join-Path $Root 'android\native')
+        Remove-Item -Recurse -Force (Join-Path (Join-Path $Root 'fuzz') 'target') -ErrorAction SilentlyContinue
+        Push-Location (Join-Path (Join-Path $Root 'android') 'native')
         try {
             cargo clean
             Assert-Exit 'cargo clean (android/native)'

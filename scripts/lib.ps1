@@ -75,7 +75,7 @@ function Add-UserPath([string]$Dir) {
 function Get-AndroidSdk {
     $candidates = @($env:ANDROID_HOME, $env:ANDROID_SDK_ROOT)
     if ($env:LOCALAPPDATA) {
-        $candidates += Join-Path $env:LOCALAPPDATA 'Android\Sdk'
+        $candidates += Join-Path (Join-Path $env:LOCALAPPDATA 'Android') 'Sdk'
     }
     foreach ($dir in $candidates) {
         if ($dir -and (Test-Path $dir)) { return $dir }
@@ -85,9 +85,9 @@ function Get-AndroidSdk {
 
 function Get-SdkManager([string]$Sdk) {
     $candidates = @(
-        (Join-Path $Sdk 'cmdline-tools\latest\bin\sdkmanager.bat'),
-        (Join-Path $Sdk 'cmdline-tools\bin\sdkmanager.bat'),
-        (Join-Path $Sdk 'tools\bin\sdkmanager.bat')
+        (Join-Path (Join-Path (Join-Path $Sdk 'cmdline-tools') 'latest') (Join-Path 'bin' 'sdkmanager.bat')),
+        (Join-Path (Join-Path $Sdk 'cmdline-tools') (Join-Path 'bin' 'sdkmanager.bat')),
+        (Join-Path (Join-Path $Sdk 'tools') (Join-Path 'bin' 'sdkmanager.bat'))
     )
     foreach ($candidate in $candidates) {
         if (Test-Path $candidate) { return $candidate }
@@ -102,11 +102,75 @@ function Test-FfmpegDir([string]$Dir) {
     return (Test-Path (Join-Path $Dir 'include/libavcodec/avcodec.h'))
 }
 
+# True when $Dir holds the libclang bindgen loads.
+function Test-LibclangDir([string]$Dir) {
+    if (-not $Dir) { return $false }
+    return ((Test-Path (Join-Path $Dir 'clang.dll')) -or (Test-Path (Join-Path $Dir 'libclang.dll')))
+}
+
+# The directory holding clang.dll/libclang.dll: LIBCLANG_PATH, LLVM's
+# default install location, whatever clang/llvm-config resolves to,
+# winget's per-package folder or the uninstall registry entry.
+function Find-LibclangDir {
+    $candidates = New-Object System.Collections.Generic.List[string]
+    if ($env:LIBCLANG_PATH) { $candidates.Add($env:LIBCLANG_PATH) }
+    foreach ($base in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
+        if ($base) { $candidates.Add((Join-Path (Join-Path $base 'LLVM') 'bin')) }
+    }
+    foreach ($tool in @('clang', 'llvm-config')) {
+        if (Have $tool) {
+            $candidates.Add((Split-Path -Parent (Get-Command $tool).Source))
+        }
+    }
+    if ($env:LOCALAPPDATA) {
+        # Forward slashes: PowerShell accepts them on Windows too, so
+        # this branch stays testable on any OS.
+        $winget = Join-Path $env:LOCALAPPDATA 'Microsoft/WinGet/Packages'
+        if (Test-Path $winget) {
+            Get-ChildItem -Path $winget -Filter 'LLVM.LLVM*' -Directory -ErrorAction SilentlyContinue |
+                ForEach-Object {
+                    foreach ($name in @('clang.dll', 'libclang.dll')) {
+                        Get-ChildItem -Path $_.FullName -Filter $name -Recurse -Depth 3 -ErrorAction SilentlyContinue |
+                            ForEach-Object { $candidates.Add($_.DirectoryName) }
+                    }
+                }
+        }
+    }
+    foreach ($hive in @(
+            'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
+            'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'
+        )) {
+        if (-not (Test-Path $hive)) { continue }
+        Get-ChildItem $hive -ErrorAction SilentlyContinue | ForEach-Object {
+            $props = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
+            if ($props.DisplayName -like 'LLVM*' -and $props.InstallLocation) {
+                $candidates.Add((Join-Path $props.InstallLocation 'bin'))
+            }
+        }
+    }
+    foreach ($dir in $candidates) {
+        if (Test-LibclangDir $dir) { return $dir }
+    }
+    return $null
+}
+
+# Points LIBCLANG_PATH at libclang. Without it bindgen panics with
+# "Unable to find libclang" while ffmpeg-sys-next builds.
+function Resolve-Libclang {
+    $dir = Find-LibclangDir
+    if (-not $dir) {
+        Fail 'libclang not found (bindgen needs it); run scripts\setup.ps1, or install LLVM (winget install LLVM.LLVM) and set LIBCLANG_PATH to its bin directory'
+    }
+    $env:LIBCLANG_PATH = $dir
+    Add-SessionPath $dir
+    Ok "LIBCLANG_PATH=$dir"
+}
+
 # Points FFMPEG_DIR at an existing dev build: the environment, a
 # previous setup download, or vcpkg. The crate cannot build without
 # the headers, so a miss is fatal here with the fix in the message.
 function Resolve-Ffmpeg {
-    $local = Join-Path $Root "tools\ffmpeg\$FfmpegFolder"
+    $local = Join-Path (Join-Path (Join-Path $Root 'tools') 'ffmpeg') $FfmpegFolder
     if (Test-FfmpegDir $env:FFMPEG_DIR) {
         $dir = $env:FFMPEG_DIR
     }
@@ -144,7 +208,7 @@ function Require-Android {
         Fail "Java 17+ required (found $line)"
     }
 
-    if (-not (Test-Path (Join-Path $sdk "ndk\$NdkVersion"))) {
+    if (-not (Test-Path (Join-Path (Join-Path $sdk 'ndk') $NdkVersion))) {
         Fail "NDK $NdkVersion missing in $sdk; run scripts\setup.ps1"
     }
     if (-not (Have 'cargo-ndk')) {

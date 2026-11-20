@@ -31,10 +31,12 @@ powershell -ExecutionPolicy Bypass -File scripts\rebuild.ps1 [-Release] [-NoClea
 - `setup` installs the system packages, Rust components, `cargo-deny`,
   `cargo-fuzz`, `cargo-ndk`, the Android Rust target and the NDK /
   platform / build-tools. It asks before every change (`--yes`/`-Yes`
-  skips the prompts) and is safe to re-run. Windows setup also
-  downloads the pinned FFmpeg shared build into `tools/ffmpeg` and gets
-  `protoc` from winget, choco or the release zip; `-Persist` writes
-  `FFMPEG_DIR`, `PATH` and `ANDROID_HOME` to the user environment.
+  skips the prompts) and is safe to re-run. Windows setup also installs
+  LLVM via winget when libclang is missing (bindgen needs `libclang.dll`
+  while `ffmpeg-sys-next` builds), downloads the pinned FFmpeg shared
+  build into `tools/ffmpeg` and gets `protoc` from winget, choco or the
+  release zip; `-Persist` writes `FFMPEG_DIR`, `LIBCLANG_PATH`, `PATH`
+  and `ANDROID_HOME` to the user environment.
 - `test` runs fmt, tests, clippy and `cargo deny` for the
   workspace, then `assembleDebug testDebugUnitTest lintDebug` for the
   Android app. The Android half is required, as in CI.
@@ -80,7 +82,7 @@ cargo install cargo-ndk
 
 ## Windows
 
-Rust with the MSVC toolchain, Visual Studio Build Tools (C++ workload), Windows SDK and WDK (driver work), LLVM (for bindgen), `protoc`, FFmpeg development libraries (vcpkg or a shared build), Android platform-tools, Git.
+Rust with the MSVC toolchain, Visual Studio Build Tools (C++ workload), Windows SDK and WDK (driver work), LLVM (for bindgen: `ffmpeg-sys-next` runs bindgen, which loads `libclang.dll`), `protoc`, FFmpeg development libraries (vcpkg or a shared build), Android platform-tools, Git.
 
 FFmpeg for the encoder (ADR-014): the CI Windows job downloads the
 pinned gyan.dev shared build (`ffmpeg-9.0.2-full_build-shared.zip`)
