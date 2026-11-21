@@ -49,8 +49,9 @@ use windows::{
                 GetMonitorInfoW, HMONITOR, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint,
             },
         },
+        Media::{timeBeginPeriod, timeEndPeriod},
         System::{
-            Com::{COINIT_MULTITHREADED, CoInitializeEx},
+            Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize},
             WinRT::{
                 Direct3D11::{CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess},
                 Graphics::Capture::IGraphicsCaptureItemInterop,
@@ -67,6 +68,40 @@ const E_FAIL: HRESULT = HRESULT(0x8000_4005u32 as i32);
 /// Setup must complete inside this (no consent dialog, but device
 /// creation can stall on a wedged GPU stack).
 const START_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Keeps the system timer at 1 ms for as long as the capture (and so
+/// the pump waiting on it) lives.
+///
+/// Windows' default timer resolution is the 15.625 ms scheduler tick:
+/// any timed wait shorter than that rounds up to the next tick. The
+/// pump's pacing wait is a capture `next_frame` timeout, so at 90 fps
+/// (11.1 ms period) every repeat would sleep a full tick and the
+/// stream would cap at ~64 fps regardless of `--fps`. Raising the
+/// resolution makes sub-tick waits reachable; since Windows 10 2004
+/// the setting is scoped to the calling process. The guard restores
+/// the previous resolution when the session's capture stops.
+struct TimerResolution;
+
+impl TimerResolution {
+    fn begin() -> Self {
+        // SAFETY: winmm takes a plain period in milliseconds and has
+        // no failure mode that matters here; the matching
+        // timeEndPeriod(1) runs in Drop.
+        unsafe {
+            timeBeginPeriod(1);
+        }
+        TimerResolution
+    }
+}
+
+impl Drop for TimerResolution {
+    fn drop(&mut self) {
+        // SAFETY: pairs the timeBeginPeriod(1) from begin().
+        unsafe {
+            timeEndPeriod(1);
+        }
+    }
+}
 
 enum WorkerState {
     /// Worker spawned, first frame not yet delivered.
@@ -168,6 +203,9 @@ struct CopierState {
 pub struct WgcCapture {
     shared: Option<Arc<Shared>>,
     worker: Option<JoinHandle<()>>,
+    /// 1 ms timer resolution for the capture's lifetime; see
+    /// [`TimerResolution`].
+    timer: Option<TimerResolution>,
 }
 
 /// Primary monitor handle and geometry for the frame pool's size.
@@ -231,10 +269,10 @@ fn run_worker(shared: Arc<Shared>) {
     // another mode), continue and let the next call surface a real
     // error instead of failing setup here.
     // SAFETY: standard COM apartment initialization on this thread.
-    let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+    let com = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
 
     match setup_capture(&shared) {
-        Ok((pool, session)) => {
+        Ok((pool, session, token)) => {
             // Park until stop or failure; the handler does the real
             // work. Pool and session live until the worker exits;
             // closing them here releases the capture on this thread.
@@ -244,17 +282,30 @@ fn run_worker(shared: Arc<Shared>) {
             ) {
                 std::thread::sleep(Duration::from_millis(100));
             }
+            // Unregister before closing: WGC dispatches FrameArrived
+            // on its own threads, and a callback racing the close is
+            // the documented way to get a use-after-close crash.
+            let _ = pool.RemoveFrameArrived(token);
             let _ = session.Close();
             let _ = pool.Close();
             shared.set(WorkerState::Stopped);
         }
         Err(e) => shared.set(WorkerState::Error(format!("capture setup: {e}"))),
     }
+
+    // Balance a successful CoInitializeEx (S_OK or S_FALSE); an error
+    // such as RPC_E_CHANGED_MODE means this thread did not join an
+    // apartment and must not uninitialize one.
+    if com.is_ok() {
+        // SAFETY: pairs the successful CoInitializeEx above, on the
+        // same thread.
+        unsafe { CoUninitialize() };
+    }
 }
 
 fn setup_capture(
     shared: &Arc<Shared>,
-) -> WResult<(Direct3D11CaptureFramePool, GraphicsCaptureSession)> {
+) -> WResult<(Direct3D11CaptureFramePool, GraphicsCaptureSession, i64)> {
     let (device, context) = create_d3d_device()?;
     let dxgi_device: IDXGIDevice = device.cast()?;
     // SAFETY: linkage-only wrapper around d3d11.dll; the returned
@@ -298,16 +349,18 @@ fn setup_capture(
             Ok(())
         },
     );
-    pool.FrameArrived(&handler)?;
+    let token = pool.FrameArrived(&handler)?;
     let session = pool.CreateCaptureSession(&item)?;
-    // The cursor and the yellow capture border would be burned into
-    // the frames; a mirror must show neither. Borderless capture can
-    // be refused (unpackaged app, older build); keep the border then
+    // The pointer belongs in the stream: the tablet's touch-as-pointer
+    // drives the host cursor, so the user must see where it is (the
+    // Linux portal stream includes it too). The yellow capture border
+    // is a host-only artifact and stays off; borderless capture can be
+    // refused (unpackaged app, older build), so keep the border then
     // rather than failing the capture.
-    let _ = session.SetIsCursorCaptureEnabled(false);
+    let _ = session.SetIsCursorCaptureEnabled(true);
     let _ = session.SetIsBorderRequired(false);
     session.StartCapture()?;
-    Ok((pool, session))
+    Ok((pool, session, token))
 }
 
 /// Copy one arrived frame into a staging texture and publish it. Errors
@@ -464,6 +517,9 @@ impl CaptureSource for WgcCapture {
         if self.shared.is_some() {
             return Err(CaptureError::Unsupported("already started".into()));
         }
+        // Before the first frame is published: the pump's pacing waits
+        // start as soon as this returns.
+        let timer = TimerResolution::begin();
         let shared = Arc::new(Shared::new());
         let worker_shared = Arc::clone(&shared);
         let fps_hint = config.max_fps.max(1);
@@ -482,6 +538,7 @@ impl CaptureSource for WgcCapture {
                     drop(guard);
                     self.shared = Some(shared);
                     self.worker = Some(worker);
+                    self.timer = Some(timer);
                     return Ok(CaptureInfo {
                         fps: fps_hint,
                         ..info
@@ -548,6 +605,8 @@ impl CaptureSource for WgcCapture {
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
+        // After the worker: nothing is waiting on the timer any more.
+        self.timer = None;
     }
 }
 

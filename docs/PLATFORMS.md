@@ -7,7 +7,7 @@ Starting points, not guarantees. Verify each API against current documentation b
 | Area | Approach |
 |---|---|
 | Virtual display | Indirect Display Driver (IddCx, UMDF) built from an existing open-source IDD with a compatible license (spike S2) |
-| Capture | Windows.Graphics.Capture into a D3D11 staging copy (`slateway-win::WgcCapture`); evaluate taking frames from the IDD swapchain |
+| Capture | Windows.Graphics.Capture into a D3D11 staging copy (`slateway-win::WgcCapture`); the pointer is included in the stream (as in the Linux portal), the capture border is not. Evaluate taking frames from the IDD swapchain |
 | Encode | `h264_nvenc` first, `libx264` ultrafast zerolatency as fallback for M1 (ADR-014); `h264_qsv` and `h264_amf` candidates pending input-format verification (DECISIONS pending) |
 | Input | M1 touch-as-pointer: `SendInput` absolute mouse over the primary monitor (user-approved 2026-11; visible cursor, no elevation). M3 pen: synthetic pointer injection (`CreateSyntheticPointerDevice`, `InjectSyntheticPointerInput`, PT_PEN) for pressure and tilt |
 | Virtual camera | Media Foundation virtual camera API, Windows 11 only. Windows 10 unsupported initially |
@@ -40,6 +40,7 @@ Starting points, not guarantees. Verify each API against current documentation b
 ## Known gotchas
 
 - **Hybrid GPUs:** capturing on the iGPU and encoding on the dGPU forces a frame copy. Display routing depends on MUX settings. Test both paths.
+- **Timer resolution (Windows):** the default 15.625 ms scheduler tick clamps every timed wait, so the pump's pacing wait cannot hold a period under ~16 ms (`--fps` above ~64). `slateway-win`'s capture raises the resolution to 1 ms for the capture's lifetime (process-scoped since Windows 10 2004) and the pacer advances on an absolute grid so wake jitter does not accumulate.
 - **USB power:** a laptop port may not out-supply the tablet at full brightness while decoding. Expect slow discharge.
 - **USB 2.0 tablets:** ample for compressed video, ruling out raw frames.
 - **Secure Boot:** off for Windows test signing. It also affects out-of-tree Linux modules such as `v4l2loopback`.

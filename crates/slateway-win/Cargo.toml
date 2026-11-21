@@ -36,6 +36,8 @@ windows = { version = "0.62.2", features = [
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
+    # 1 ms timer resolution for the pump's pacing waits (winmm).
+    "Win32_Media",
     # Input injection (M1 touch-as-pointer): SendInput + mouse flags,
     # GetSystemMetrics for the virtual desktop mapping.
     "Win32_UI_Input_KeyboardAndMouse",

@@ -114,6 +114,15 @@ repeat carries a fresh pts so the tablet's stats see send time, not
 content age. The `video: encode 2s:` heartbeat shows
 `encoded=… repeated=… skipped=… errs=…`.
 
+The pacer advances on an absolute grid (next deadline = previous +
+period), so a late wake-up shortens the following wait instead of
+adding to every period; a send that misses whole periods rebases
+instead of bursting. On Windows the capture also raises the timer
+resolution to 1 ms for the session (the default 15.625 ms tick clamps
+every shorter wait and capped `--fps 90` at ~64 fps); see
+`PLATFORMS.md`, "Known gotchas". Verify with the heartbeat: at
+`--fps 90` it should report ~180 encoded per 2 s window, not ~129.
+
 ### Why tick, not fill (A/B on 2026-11-19)
 
 The spike also implemented `fill` (fresh frames never wait; repeats hold

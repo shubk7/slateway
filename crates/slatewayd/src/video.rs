@@ -73,8 +73,15 @@ impl Pacer {
     }
 
     /// Advances the deadline after a send (or a skipped one).
+    ///
+    /// The tick grid is absolute: the next deadline is one period
+    /// after the previous one, so wake-up jitter and short waits do
+    /// not accumulate into a slower average rate. A send that missed
+    /// one or more whole periods (a stalled pump) rebases on `now`
+    /// instead of firing a catch-up burst: one frame per period.
     fn advance(&mut self, now: Instant) {
-        self.deadline = now + self.period;
+        let next = self.deadline + self.period;
+        self.deadline = if next > now { next } else { now + self.period };
     }
 
     /// Sends as soon as possible (a keyframe request re-opened the
@@ -438,6 +445,23 @@ mod tests {
         assert_eq!(pacer.wait(early), Duration::from_millis(12));
         assert!(!pacer.due(t0 + Duration::from_millis(15)));
         assert!(pacer.due(t0 + PERIOD));
+    }
+
+    #[test]
+    fn late_wakeups_do_not_slow_the_grid() {
+        // Every tick wakes 4 ms late (Windows' timer granularity, see
+        // docs/PLATFORMS.md "Frame pacing"). The absolute grid absorbs
+        // the jitter: ten sends still span exactly ten periods.
+        let t0 = Instant::now();
+        let mut pacer = Pacer::new(PERIOD, t0);
+        let mut deadline = t0;
+        for _ in 0..10 {
+            let late = deadline + Duration::from_millis(4);
+            assert!(pacer.due(late));
+            pacer.advance(late);
+            deadline += PERIOD;
+            assert_eq!(pacer.deadline, deadline);
+        }
     }
 
     #[test]

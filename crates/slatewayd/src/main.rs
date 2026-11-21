@@ -26,9 +26,15 @@ const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
 
 #[tokio::main]
 async fn main() {
-    if let Err(err) = run().await {
-        eprintln!("slatewayd: {err}");
-        std::process::exit(1);
+    match run().await {
+        // The accept loop has no exit: reaching this means a bug, and
+        // a silent exit (the process just disappears after a session)
+        // must not be mistaken for a crash.
+        Ok(()) => eprintln!("slatewayd: accept loop ended unexpectedly"),
+        Err(err) => {
+            eprintln!("slatewayd: {err}");
+            std::process::exit(1);
+        }
     }
 }
 
