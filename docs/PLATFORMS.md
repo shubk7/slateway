@@ -41,6 +41,7 @@ Starting points, not guarantees. Verify each API against current documentation b
 
 - **Hybrid GPUs:** capturing on the iGPU and encoding on the dGPU forces a frame copy. Display routing depends on MUX settings. Test both paths.
 - **Timer resolution (Windows):** the default 15.625 ms scheduler tick clamps every timed wait, so the pump's pacing wait cannot hold a period under ~16 ms (`--fps` above ~64). `slateway-win`'s capture raises the resolution to 1 ms for the capture's lifetime (process-scoped since Windows 10 2004) and the pacer advances on an absolute grid so wake jitter does not accumulate.
+- **WGC teardown (Windows):** destroying a capture session tears down the worker thread's COM apartment, and the loader can then unload `GraphicsCapture.dll` while WGC's own present thread is still winding down — the daemon dies with `0xC0000005` in `GraphicsCapture.dll_unloaded` (event 1000, seen 2026-11-21 right after a tablet disconnect). `slateway-win` pins the module for the process lifetime and drains in-flight `FrameArrived` callbacks before closing the frame pool.
 - **USB power:** a laptop port may not out-supply the tablet at full brightness while decoding. Expect slow discharge.
 - **USB 2.0 tablets:** ample for compressed video, ruling out raw frames.
 - **Secure Boot:** off for Windows test signing. It also affects out-of-tree Linux modules such as `v4l2loopback`.

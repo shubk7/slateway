@@ -11,7 +11,10 @@
 //! the same mutex/condvar handoff the Linux side uses.
 
 use std::{
-    sync::{Arc, Condvar, Mutex},
+    sync::{
+        Arc, Condvar, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     thread::JoinHandle,
     time::{Duration, Instant},
 };
@@ -52,6 +55,7 @@ use windows::{
         Media::{timeBeginPeriod, timeEndPeriod},
         System::{
             Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize},
+            LibraryLoader::{GET_MODULE_HANDLE_EX_FLAG_PIN, GetModuleHandleExW, LoadLibraryW},
             WinRT::{
                 Direct3D11::{CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess},
                 Graphics::Capture::IGraphicsCaptureItemInterop,
@@ -103,6 +107,42 @@ impl Drop for TimerResolution {
     }
 }
 
+/// Keeps `GraphicsCapture.dll` mapped for the rest of the process.
+///
+/// WGC runs its own present thread inside that DLL. When a session's
+/// capture is torn down, the worker thread's apartment goes away and
+/// the loader can unload the DLL while the present thread is still
+/// winding down; the thread then executes unmapped code and the whole
+/// process dies with 0xC0000005 in `GraphicsCapture.dll_unloaded`
+/// (Windows 11 24H2, event 1000, observed 2026-11-21 right after a
+/// tablet disconnect). Pinning the module is the loader's documented
+/// "never unload until the process ends" mode, so a WGC thread that
+/// outlives the capture cannot fault on missing code.
+fn pin_graphics_capture() {
+    use std::sync::Once;
+    static PIN: Once = Once::new();
+    PIN.call_once(|| {
+        let name = windows::core::HSTRING::from("GraphicsCapture.dll");
+        let mut module = HMODULE::default();
+        // SAFETY: plain loader calls on a system DLL name. The load
+        // only ensures the module is present; the pin makes its
+        // reference permanent (no FreeLibrary is ever needed).
+        unsafe {
+            let _ = LoadLibraryW(&name);
+            let _ = GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_PIN, &name, &mut module);
+        }
+    });
+}
+
+/// Decrements [`Shared::handlers`] however `handle_frame` returns.
+struct ActiveHandler<'a>(&'a AtomicUsize);
+
+impl Drop for ActiveHandler<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 enum WorkerState {
     /// Worker spawned, first frame not yet delivered.
     Connecting,
@@ -130,6 +170,11 @@ struct State {
 struct Shared {
     state: Mutex<State>,
     new_frame: Condvar,
+    /// FrameArrived callbacks inside `handle_frame` right now. The
+    /// teardown drains this before closing the pool: a callback may
+    /// still hold a frame from the pool, and closing under it is the
+    /// documented crash.
+    handlers: AtomicUsize,
 }
 
 impl Shared {
@@ -140,6 +185,7 @@ impl Shared {
                 latest: None,
             }),
             new_frame: Condvar::new(),
+            handlers: AtomicUsize::new(0),
         }
     }
 
@@ -286,6 +332,13 @@ fn run_worker(shared: Arc<Shared>) {
             // on its own threads, and a callback racing the close is
             // the documented way to get a use-after-close crash.
             let _ = pool.RemoveFrameArrived(token);
+            // Then let a callback that already started finish: it can
+            // still hold a frame from the pool. Bounded so a wedged
+            // handler cannot hang the session teardown.
+            let drain_deadline = Instant::now() + Duration::from_secs(1);
+            while shared.handlers.load(Ordering::Acquire) != 0 && Instant::now() < drain_deadline {
+                std::thread::sleep(Duration::from_millis(1));
+            }
             let _ = session.Close();
             let _ = pool.Close();
             shared.set(WorkerState::Stopped);
@@ -306,6 +359,9 @@ fn run_worker(shared: Arc<Shared>) {
 fn setup_capture(
     shared: &Arc<Shared>,
 ) -> WResult<(Direct3D11CaptureFramePool, GraphicsCaptureSession, i64)> {
+    // Before the first WGC object exists, and once per process: see
+    // `pin_graphics_capture`.
+    pin_graphics_capture();
     let (device, context) = create_d3d_device()?;
     let dxgi_device: IDXGIDevice = device.cast()?;
     // SAFETY: linkage-only wrapper around d3d11.dll; the returned
@@ -367,6 +423,8 @@ fn setup_capture(
 /// become a shared failure state; event handlers cannot propagate them
 /// usefully.
 fn handle_frame(pool: &Direct3D11CaptureFramePool, shared: &Arc<Shared>, copier: &Arc<Copier>) {
+    shared.handlers.fetch_add(1, Ordering::AcqRel);
+    let _active = ActiveHandler(&shared.handlers);
     // A frame whose ContentSize differs from the pool size cannot be
     // copied (CopyResource requires identical dimensions and its
     // failure mode is silent corruption or device removal, not an
